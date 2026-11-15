@@ -171,17 +171,21 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Default State: Active
 	// 1. Sign CSR on OpenVox CA (if not already signed)
 	fingerprint := node.Status.CertificateFingerprint
-	if !node.Status.CertificateSigned {
+	certSigned := node.Status.CertificateSigned
+	if !certSigned {
 		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
 			fp, err := caClient.SignCSR(ctx, caEndpoint(cluster), node.Spec.Certname)
 			if err != nil {
 				logger.Info("OpenVox CA CSR not pending or CA not reachable; continuing ENC and Hiera sync", "certname", node.Spec.Certname, "reason", err.Error())
 			} else {
 				fingerprint = fp
+				certSigned = true
 			}
+		} else {
+			certSigned = true
 		}
 	}
-	if fingerprint == "" {
+	if certSigned && fingerprint == "" {
 		fingerprint = "sha256:signed-" + node.Spec.Certname
 	}
 
@@ -199,7 +203,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	node.Status.Phase = openvoxv1alpha1.NodePhaseActive
-	node.Status.CertificateSigned = true
+	node.Status.CertificateSigned = certSigned
 	node.Status.CertificateFingerprint = fingerprint
 	node.Status.CACleaned = false
 	node.Status.PuppetDBDeactivated = false

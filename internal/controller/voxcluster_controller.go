@@ -1035,18 +1035,20 @@ if [ ! -f "$ENVDIR/manifests/site.pp" ]; then
   mkdir -p "$ENVDIR/manifests" "$ENVDIR/modules/profile/manifests"
   cat <<'SITEPP' > "$ENVDIR/manifests/site.pp"
 node default {
-  $msg = pick($facts['voxkube_welcome'], getvar('welcome_message'), 'Managed by VoxKube Operator')
+  $msg   = getvar('welcome_message') ? { undef => 'Managed by VoxKube Operator', default => getvar('welcome_message') }
+  $clust = getvar('voxkube_cluster') ? { undef => 'production', default => getvar('voxkube_cluster') }
+  $role  = getvar('role') ? { undef => 'default', default => getvar('role') }
   file { '/etc/voxkube-node.txt':
     ensure  => file,
-    content => "Node: ${trusted['certname']}\nCluster: ${getvar('voxkube_cluster')}\nRole: ${getvar('role')}\nMessage: ${msg}\n",
+    content => "Node: ${trusted['certname']}\nCluster: ${clust}\nRole: ${role}\nMessage: ${msg}\n",
     mode    => '0644',
   }
 }
 SITEPP
   cat <<'NGINXPP' > "$ENVDIR/modules/profile/manifests/nginx.pp"
 class profile::nginx {
-  $port = pick(getvar('http_port'), '80')
-  $msg  = pick(getvar('welcome_message'), 'Welcome to VoxKube')
+  $port = getvar('http_port') ? { undef => '80', default => getvar('http_port') }
+  $msg  = getvar('welcome_message') ? { undef => 'Welcome to VoxKube', default => getvar('welcome_message') }
   file { '/etc/voxkube-nginx.conf':
     ensure  => file,
     content => "# Managed by VoxKube OpenVox Operator\nserver {\n  listen ${port};\n  server_name ${trusted['certname']};\n  # ${msg}\n}\n",
