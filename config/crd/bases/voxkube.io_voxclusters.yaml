@@ -256,7 +256,7 @@ spec:
                           mode is "external".
                         type: string
                       image:
-                        default: postgres:16-alpine
+                        default: quay.io/sclorg/postgresql-16-c9s:latest
                         description: Image is the PostgreSQL image when mode is "builtin".
                         type: string
                       mode:

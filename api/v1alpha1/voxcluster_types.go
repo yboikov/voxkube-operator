@@ -252,7 +252,7 @@ type ClusterPostgresSpec struct {
 	SSLMode string `json:"sslMode,omitempty"`
 
 	// Image is the PostgreSQL image when mode is "builtin".
-	// +kubebuilder:default="postgres:16-alpine"
+	// +kubebuilder:default="quay.io/sclorg/postgresql-16-c9s:latest"
 	Image string `json:"image,omitempty"`
 
 	// StorageSize is the PVC size when mode is "builtin".

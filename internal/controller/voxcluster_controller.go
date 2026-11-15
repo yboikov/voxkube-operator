@@ -285,7 +285,25 @@ func (r *VoxClusterReconciler) reconcileDatabaseStack(ctx context.Context, clust
 
 		pgImg := cluster.Spec.Database.Postgres.Image
 		if pgImg == "" {
-			pgImg = "postgres:16-alpine"
+			pgImg = "quay.io/sclorg/postgresql-16-c9s:latest"
+		}
+
+		pgInitCMName := fmt.Sprintf("%s-postgres-init", cluster.Name)
+		pgInitCM := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pgInitCMName,
+				Namespace: cluster.Namespace,
+				Labels:    voxClusterLabels(cluster.Name, "postgres"),
+			},
+			Data: map[string]string{
+				"01-pg-trgm.sh": "psql -U postgres -d \"${POSTGRESQL_DATABASE}\" -c \"CREATE EXTENSION IF NOT EXISTS pg_trgm;\"\n",
+			},
+		}
+		if err := controllerutil.SetControllerReference(cluster, pgInitCM, r.Scheme); err != nil {
+			return "", err
+		}
+		if err := r.createOrUpdateConfigMap(ctx, pgInitCM); err != nil {
+			return "", err
 		}
 
 		sts := &appsv1.StatefulSet{
@@ -312,13 +330,35 @@ func (r *VoxClusterReconciler) reconcileDatabaseStack(ctx context.Context, clust
 								Image:           pgImg,
 								SecurityContext: buildRestrictedContainerSecurityContext(),
 								Env: []corev1.EnvVar{
+									{Name: "POSTGRESQL_DATABASE", Value: dbName},
+									{Name: "POSTGRESQL_USER", Value: "openvoxdb"},
+									{Name: "POSTGRESQL_PASSWORD", Value: "openvoxdb"},
 									{Name: "POSTGRES_DB", Value: dbName},
 									{Name: "POSTGRES_USER", Value: "openvoxdb"},
 									{Name: "POSTGRES_PASSWORD", Value: "openvoxdb"},
-									{Name: "PGDATA", Value: "/var/lib/postgresql/data/pgdata"},
 								},
 								Ports: []corev1.ContainerPort{
 									{Name: "postgres", ContainerPort: pgPort, Protocol: corev1.ProtocolTCP},
+								},
+								VolumeMounts: []corev1.VolumeMount{
+									{Name: "pgdata", MountPath: "/var/lib/pgsql/data"},
+									{Name: "pg-init", MountPath: "/opt/app-root/src/postgresql-start/01-pg-trgm.sh", SubPath: "01-pg-trgm.sh", ReadOnly: true},
+								},
+							},
+						},
+						Volumes: []corev1.Volume{
+							{
+								Name: "pgdata",
+								VolumeSource: corev1.VolumeSource{
+									EmptyDir: &corev1.EmptyDirVolumeSource{},
+								},
+							},
+							{
+								Name: "pg-init",
+								VolumeSource: corev1.VolumeSource{
+									ConfigMap: &corev1.ConfigMapVolumeSource{
+										LocalObjectReference: corev1.LocalObjectReference{Name: pgInitCMName},
+									},
 								},
 							},
 						},
@@ -330,6 +370,26 @@ func (r *VoxClusterReconciler) reconcileDatabaseStack(ctx context.Context, clust
 			return "", err
 		}
 		if err := r.createOrUpdateStatefulSet(ctx, sts); err != nil {
+			return "", err
+		}
+
+		pgSvc := &corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pgSvcName,
+				Namespace: cluster.Namespace,
+				Labels:    voxClusterLabels(cluster.Name, "postgres"),
+			},
+			Spec: corev1.ServiceSpec{
+				Selector: voxClusterLabels(cluster.Name, "postgres"),
+				Ports: []corev1.ServicePort{
+					{Name: "postgres", Port: pgPort, TargetPort: intstr.FromInt32(pgPort), Protocol: corev1.ProtocolTCP},
+				},
+			},
+		}
+		if err := controllerutil.SetControllerReference(cluster, pgSvc, r.Scheme); err != nil {
+			return "", err
+		}
+		if err := r.createOrUpdateService(ctx, pgSvc); err != nil {
 			return "", err
 		}
 	}
@@ -356,11 +416,25 @@ func (r *VoxClusterReconciler) reconcileDatabaseStack(ctx context.Context, clust
 	databaseIni := fmt.Sprintf(`[database]
 subname = //%s:%d/%s
 username = openvoxdb
+password = openvoxdb
+migrator-username = openvoxdb
+migrator-password = openvoxdb
 node-ttl = %s
 node-purge-ttl = %s
 report-ttl = %s
 gc-interval = %d
 `, pgHost, pgPort, dbName, nodeTTL, nodePurgeTTL, reportTTL, gcInterval)
+
+	jettyIni := `[jetty]
+host = 0.0.0.0
+port = 8080
+ssl-host = 0.0.0.0
+ssl-port = 8081
+ssl-key = /etc/puppetlabs/puppetdb/ssl/tls.key
+ssl-cert = /etc/puppetlabs/puppetdb/ssl/tls.crt
+ssl-ca-cert = /etc/puppetlabs/puppetdb/ssl/ca.crt
+access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
+`
 
 	dbCMName := fmt.Sprintf("%s-db-config", cluster.Name)
 	dbCM := &corev1.ConfigMap{
@@ -371,6 +445,7 @@ gc-interval = %d
 		},
 		Data: map[string]string{
 			"database.ini": databaseIni,
+			"jetty.ini":    jettyIni,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, dbCM, r.Scheme); err != nil {
@@ -414,10 +489,14 @@ gc-interval = %d
 							Image:           dbImg,
 							SecurityContext: buildRestrictedContainerSecurityContext(),
 							Ports: []corev1.ContainerPort{
+								{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
 								{Name: "https", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "db-config", MountPath: "/etc/puppetlabs/puppetdb/conf.d/database.ini", SubPath: "database.ini", ReadOnly: true},
+								{Name: "db-config", MountPath: "/etc/puppetlabs/puppetdb/conf.d/jetty.ini", SubPath: "jetty.ini", ReadOnly: true},
+								{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppetdb/ssl", ReadOnly: true},
+								{Name: "db-vardir", MountPath: "/opt/puppetlabs/server/data/puppetdb"},
 							},
 						},
 					},
@@ -428,6 +507,18 @@ gc-interval = %d
 								ConfigMap: &corev1.ConfigMapVolumeSource{
 									LocalObjectReference: corev1.LocalObjectReference{Name: dbCMName},
 								},
+							},
+						},
+						{
+							Name: "ca-tls",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{SecretName: fmt.Sprintf("%s-ca-tls", cluster.Name)},
+							},
+						},
+						{
+							Name: "db-vardir",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
 							},
 						},
 					},
@@ -451,6 +542,7 @@ gc-interval = %d
 		Spec: corev1.ServiceSpec{
 			Selector: voxClusterLabels(cluster.Name, "db"),
 			Ports: []corev1.ServicePort{
+				{Name: "http", Port: 8080, TargetPort: intstr.FromInt32(8080), Protocol: corev1.ProtocolTCP},
 				{Name: "https", Port: 8081, TargetPort: intstr.FromInt32(8081), Protocol: corev1.ProtocolTCP},
 			},
 		},
@@ -462,7 +554,7 @@ gc-interval = %d
 		return "", err
 	}
 
-	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8081", dbDeployName, cluster.Namespace), nil
+	return fmt.Sprintf("http://%s.%s.svc.cluster.local:8080", dbDeployName, cluster.Namespace), nil
 }
 
 func (r *VoxClusterReconciler) reconcileHieraBridge(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (string, error) {
@@ -551,6 +643,75 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(
 		javaArgs = "-Xms1g -Xmx1g"
 	}
 
+	// Reconcile Server ConfigMap (webserver.conf, ca.cfg, puppet.conf, puppetserver.conf) so JRuby/Jetty uses mounted Secret certs and writable subdirectory paths
+	srvCMName := fmt.Sprintf("%s-server-config", cluster.Name)
+	webserverConf := `webserver: {
+    access-log-config: /etc/puppetlabs/puppetserver/request-logging.xml
+    client-auth: want
+    ssl-host: 0.0.0.0
+    ssl-port: 8140
+    ssl-cert: /etc/puppetlabs/puppet/ssl-certs/tls.crt
+    ssl-key: /etc/puppetlabs/puppet/ssl-certs/tls.key
+    ssl-ca-cert: /etc/puppetlabs/puppet/ssl-certs/ca.crt
+}
+`
+	caCfg := `puppetlabs.services.ca.certificate-authority-disabled-service/certificate-authority-disabled-service
+puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-watch-service
+`
+	puppetConf := `[main]
+confdir = /etc/puppetlabs/puppet
+codedir = /etc/puppetlabs/code
+vardir = /var/cache/puppetlabs/vardir
+logdir = /var/log/puppetlabs/puppetserver
+rundir = /var/run/puppetlabs/puppetserver
+ssldir = /var/cache/puppetlabs/ssldir
+`
+	maxActive := cluster.Spec.Server.MaxActiveInstances
+	if maxActive == 0 {
+		maxActive = 1
+	}
+	puppetserverConf := fmt.Sprintf(`jruby-puppet: {
+    ruby-load-path: [/opt/puppetlabs/puppet/lib/ruby/vendor_ruby]
+    gem-home: /opt/puppetlabs/server/data/puppetserver/jruby-gems
+    gem-path: [${jruby-puppet.gem-home}, "/opt/puppetlabs/server/data/puppetserver/vendored-jruby-gems", "/opt/puppetlabs/puppet/lib/ruby/vendor_gems"]
+    master-conf-dir: /etc/puppetlabs/puppet
+    master-code-dir: /etc/puppetlabs/code
+    master-var-dir: /var/cache/puppetlabs/vardir
+    master-run-dir: /var/run/puppetlabs/puppetserver
+    master-log-dir: /var/log/puppetlabs/puppetserver
+    max-active-instances: %d
+    max-requests-per-instance: 0
+}
+http-client: {
+}
+bolt: {
+    projects-dir: "/etc/puppetlabs/code/projects"
+}
+dropsonde: {
+    enabled: false
+}
+`, maxActive)
+
+	srvCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      srvCMName,
+			Namespace: cluster.Namespace,
+			Labels:    voxClusterLabels(cluster.Name, "server"),
+		},
+		Data: map[string]string{
+			"webserver.conf":    webserverConf,
+			"ca.cfg":            caCfg,
+			"puppet.conf":       puppetConf,
+			"puppetserver.conf": puppetserverConf,
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, srvCM, r.Scheme); err != nil {
+		return 0, err
+	}
+	if err := r.createOrUpdateConfigMap(ctx, srvCM); err != nil {
+		return 0, err
+	}
+
 	podAnnotations := make(map[string]string)
 	if observedCommit != "" {
 		podAnnotations[AnnotationObservedCommit] = observedCommit
@@ -567,7 +728,33 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(
 			},
 		},
 		{
+			Name: "server-config",
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: srvCMName},
+				},
+			},
+		},
+		{
 			Name: "puppet-code",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: "puppetserver-cache",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: "puppetserver-log",
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		{
+			Name: "puppetserver-run",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
 			},
@@ -583,7 +770,14 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(
 	}
 
 	volumeMounts := []corev1.VolumeMount{
-		{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl", ReadOnly: true},
+		{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
+		{Name: "server-config", MountPath: "/etc/puppetlabs/puppetserver/conf.d/webserver.conf", SubPath: "webserver.conf", ReadOnly: true},
+		{Name: "server-config", MountPath: "/etc/puppetlabs/puppetserver/conf.d/puppetserver.conf", SubPath: "puppetserver.conf", ReadOnly: true},
+		{Name: "server-config", MountPath: "/etc/puppetlabs/puppetserver/services.d/ca.cfg", SubPath: "ca.cfg", ReadOnly: true},
+		{Name: "server-config", MountPath: "/etc/puppetlabs/puppet/puppet.conf", SubPath: "puppet.conf", ReadOnly: true},
+		{Name: "puppetserver-cache", MountPath: "/var/cache/puppetlabs"},
+		{Name: "puppetserver-log", MountPath: "/var/log/puppetlabs"},
+		{Name: "puppetserver-run", MountPath: "/var/run/puppetlabs"},
 		{Name: "puppet-code", MountPath: "/etc/puppetlabs/code"},
 		{Name: "enc-nodes", MountPath: "/etc/puppetlabs/puppet/enc-nodes", ReadOnly: true},
 	}
