@@ -60,12 +60,12 @@ cluster:
       synchronizedRollout: true
       generateTypes: true
   server:
-    image: ghcr.io/slauger/openvox-server:latest
+    image: ghcr.io/yboikov/openvox-server:latest
     replicas: 2
     javaArgs: "-Xms1g -Xmx1g"
   database:
     enabled: true
-    image: ghcr.io/slauger/openvox-db:latest
+    image: ghcr.io/yboikov/openvox-db:latest
     postgres:
       mode: builtin
       storageSize: 10Gi

@@ -236,7 +236,7 @@ spec:
                         type: string
                     type: object
                   image:
-                    default: ghcr.io/slauger/openvox-db:latest
+                    default: ghcr.io/yboikov/openvox-db:latest
                     description: Image is the OpenVox DB container image.
                     type: string
                   postgres:
@@ -385,7 +385,7 @@ spec:
                         type: integer
                     type: object
                   image:
-                    default: ghcr.io/slauger/openvox-server:latest
+                    default: ghcr.io/yboikov/openvox-server:latest
                     description: Image is the OpenVox Server container image.
                     type: string
                   imagePullPolicy:
@@ -580,6 +580,9 @@ spec:
               caSecretName:
                 description: CASecretName is the name of the Secret containing the
                   OpenVox CA certificate.
+                type: string
+              caURL:
+                description: CAURL is the URL of the dedicated OpenVox CA service.
                 type: string
               conditions:
                 description: Conditions represent the latest available observations

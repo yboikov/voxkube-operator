@@ -120,7 +120,7 @@ type ClusterCASpec struct {
 // ClusterServerSpec configures the OpenVox Server catalog compilers.
 type ClusterServerSpec struct {
 	// Image is the OpenVox Server container image.
-	// +kubebuilder:default="ghcr.io/slauger/openvox-server:latest"
+	// +kubebuilder:default="ghcr.io/yboikov/openvox-server:latest"
 	Image string `json:"image,omitempty"`
 
 	// ImagePullPolicy is the container image pull policy.
@@ -207,7 +207,7 @@ type ClusterDatabaseSpec struct {
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// Image is the OpenVox DB container image.
-	// +kubebuilder:default="ghcr.io/slauger/openvox-db:latest"
+	// +kubebuilder:default="ghcr.io/yboikov/openvox-db:latest"
 	Image string `json:"image,omitempty"`
 
 	// Replicas is the number of OpenVox DB pods.
@@ -433,6 +433,10 @@ type VoxClusterStatus struct {
 	// ServerURL is the external or cluster-internal URL where Puppet agents connect.
 	// +optional
 	ServerURL string `json:"serverURL,omitempty"`
+
+	// CAURL is the URL of the dedicated OpenVox CA service.
+	// +optional
+	CAURL string `json:"caURL,omitempty"`
 
 	// DatabaseURL is the internal URL of OpenVox DB (PuppetDB).
 	// +optional

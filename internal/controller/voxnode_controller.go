@@ -133,7 +133,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// Handle State: Revoked (revoke cert on CA without deactivating history)
 	if node.Spec.State == openvoxv1alpha1.NodeStateRevoked {
 		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
-			if err := caClient.RevokeCert(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
+			if err := caClient.RevokeCert(ctx, caEndpoint(cluster), node.Spec.Certname); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -173,7 +173,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	fingerprint := node.Status.CertificateFingerprint
 	if !node.Status.CertificateSigned {
 		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
-			fp, err := caClient.SignCSR(ctx, cluster.Status.ServerURL, node.Spec.Certname)
+			fp, err := caClient.SignCSR(ctx, caEndpoint(cluster), node.Spec.Certname)
 			if err != nil {
 				logger.Info("OpenVox CA CSR not pending or CA not reachable; continuing ENC and Hiera sync", "certname", node.Spec.Certname, "reason", err.Error())
 			} else {
@@ -271,11 +271,18 @@ func (r *VoxNodeReconciler) dbClientForCluster(ctx context.Context, cluster *ope
 	return r.DBClient
 }
 
+func caEndpoint(cluster *openvoxv1alpha1.VoxCluster) string {
+	if cluster.Status.CAURL != "" {
+		return cluster.Status.CAURL
+	}
+	return cluster.Status.ServerURL
+}
+
 func (r *VoxNodeReconciler) decommissionNode(ctx context.Context, node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) error {
 	logger := log.FromContext(ctx)
 	// 1. Revoke and clean node certificate from OpenVox CA (PUT /puppet-ca/v1/clean)
 	if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
-		if err := caClient.CleanNode(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
+		if err := caClient.CleanNode(ctx, caEndpoint(cluster), node.Spec.Certname); err != nil {
 			logger.Info("OpenVox CA not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}

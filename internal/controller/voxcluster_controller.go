@@ -2,6 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -65,10 +68,15 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
-	// 1. Reconcile CA PKI Secret (<cluster>-ca-tls)
+	// 1. Reconcile CA PKI Secret (<cluster>-ca-tls) & Dedicated CA Workload (<cluster>-ca)
 	caSecretName, err := r.reconcileCAPKI(ctx, cluster)
 	if err != nil {
 		logger.Error(err, "failed to reconcile CA PKI")
+		return ctrl.Result{}, err
+	}
+	caURL, err := r.reconcileCAWorkload(ctx, cluster, caSecretName)
+	if err != nil {
+		logger.Error(err, "failed to reconcile dedicated OpenVox CA workload")
 		return ctrl.Result{}, err
 	}
 
@@ -116,6 +124,7 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// 8. Update VoxCluster Status
 	cluster.Status.Phase = openvoxv1alpha1.ClusterPhaseRunning
 	cluster.Status.CASecretName = caSecretName
+	cluster.Status.CAURL = caURL
 	cluster.Status.HieraSecretName = hieraSecretName
 	cluster.Status.DatabaseURL = dbURL
 	cluster.Status.ServerURL = serverURL
@@ -135,6 +144,9 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		latest := &openvoxv1alpha1.VoxCluster{}
 		if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
 			return err
+		}
+		if reflect.DeepEqual(latest.Status, desiredStatus) {
+			return nil
 		}
 		latest.Status = desiredStatus
 		return r.Status().Update(ctx, latest)
@@ -156,10 +168,10 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 	secName := fmt.Sprintf("%s-ca-tls", cluster.Name)
 	existing := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: secName}, existing)
-	if err == nil {
+	if err == nil && len(existing.Data["ca.pub"]) > 0 && len(existing.Data["crl.pem"]) > 0 && len(existing.Data["tls.pub"]) > 0 {
 		return secName, nil
 	}
-	if !apierrors.IsNotFound(err) {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return "", err
 	}
 
@@ -167,10 +179,16 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 	if err != nil {
 		return "", err
 	}
+	caPub, crlPEM, err := GenerateCAArtifacts(caCert, caKey)
+	if err != nil {
+		return "", err
+	}
 
 	dnsNames := []string{
 		fmt.Sprintf("%s.%s.svc", cluster.Name, cluster.Namespace),
 		fmt.Sprintf("%s.%s.svc.cluster.local", cluster.Name, cluster.Namespace),
+		fmt.Sprintf("%s-ca.%s.svc", cluster.Name, cluster.Namespace),
+		fmt.Sprintf("%s-ca.%s.svc.cluster.local", cluster.Name, cluster.Namespace),
 	}
 	if cluster.Spec.Networking.ExternalHostname != "" {
 		dnsNames = append(dnsNames, cluster.Spec.Networking.ExternalHostname)
@@ -178,6 +196,10 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 	dnsNames = append(dnsNames, cluster.Spec.Networking.AdditionalDNSNames...)
 
 	srvCert, srvKey, err := IssueClientCertificate(caCert, caKey, fmt.Sprintf("%s.%s.svc", cluster.Name, cluster.Namespace), dnsNames, 365*24*time.Hour)
+	if err != nil {
+		return "", err
+	}
+	srvPub, err := ExtractPublicKeyPEM(srvKey)
 	if err != nil {
 		return "", err
 	}
@@ -192,17 +214,310 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 		Data: map[string][]byte{
 			"ca.crt":  caCert,
 			"ca.key":  caKey,
+			"ca.pub":  caPub,
+			"crl.pem": crlPEM,
 			"tls.crt": srvCert,
 			"tls.key": srvKey,
+			"tls.pub": srvPub,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, sec, r.Scheme); err != nil {
 		return "", err
 	}
-	if err := r.Create(ctx, sec); err != nil {
+	if err := r.createOrUpdateSecret(ctx, sec); err != nil {
 		return "", err
 	}
 	return secName, nil
+}
+
+func (r *VoxClusterReconciler) reconcileCAWorkload(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, caSecretName string) (string, error) {
+	if cluster.Spec.CA.Enabled != nil && !*cluster.Spec.CA.Enabled {
+		return "", nil
+	}
+
+	caName := fmt.Sprintf("%s-ca", cluster.Name)
+	pvcName := fmt.Sprintf("%s-ca-data", cluster.Name)
+	storageSize := cluster.Spec.CA.StorageSize
+	if storageSize == "" {
+		storageSize = "2Gi"
+	}
+	qty, err := resource.ParseQuantity(storageSize)
+	if err != nil {
+		qty = resource.MustParse("2Gi")
+	}
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: cluster.Namespace,
+			Labels:    voxClusterLabels(cluster.Name, "ca"),
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: qty,
+				},
+			},
+		},
+	}
+	if cluster.Spec.CA.StorageClassName != "" {
+		sc := cluster.Spec.CA.StorageClassName
+		pvc.Spec.StorageClassName = &sc
+	}
+	if err := controllerutil.SetControllerReference(cluster, pvc, r.Scheme); err != nil {
+		return "", err
+	}
+	existingPVC := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: pvcName}, existingPVC); apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, pvc); err != nil {
+			return "", err
+		}
+	} else if err != nil {
+		return "", err
+	}
+
+	certname := fmt.Sprintf("%s.%s.svc", cluster.Name, cluster.Namespace)
+	caCMName := fmt.Sprintf("%s-ca-config", cluster.Name)
+	webserverConf := `webserver: {
+    access-log-config: /etc/puppetlabs/puppetserver/request-logging.xml
+    client-auth: want
+    ssl-host: 0.0.0.0
+    ssl-port: 8140
+    ssl-cert: /var/cache/puppetlabs/ssldir/certs/` + certname + `.pem
+    ssl-key: /var/cache/puppetlabs/ssldir/private_keys/` + certname + `.pem
+    ssl-ca-cert: /var/cache/puppetlabs/ca/ca_crt.pem
+    ssl-crl-path: /var/cache/puppetlabs/ca/ca_crl.pem
+}
+`
+	caCfg := `puppetlabs.services.ca.certificate-authority-service/certificate-authority-service
+puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-watch-service
+`
+	puppetConf := fmt.Sprintf(`[main]
+certname = %s
+confdir = /etc/puppetlabs/puppet
+codedir = /etc/puppetlabs/code
+vardir = /var/cache/puppetlabs/vardir
+logdir = /var/log/puppetlabs/puppetserver
+rundir = /var/run/puppetlabs/puppetserver
+ssldir = /var/cache/puppetlabs/ssldir
+cadir = /var/cache/puppetlabs/ca
+`, certname)
+
+	puppetserverConf := `jruby-puppet: {
+    ruby-load-path: [/opt/puppetlabs/puppet/lib/ruby/vendor_ruby]
+    gem-home: /opt/puppetlabs/server/data/puppetserver/jruby-gems
+    gem-path: [${jruby-puppet.gem-home}, "/opt/puppetlabs/server/data/puppetserver/vendored-jruby-gems", "/opt/puppetlabs/puppet/lib/ruby/vendor_gems"]
+    master-conf-dir: /etc/puppetlabs/puppet
+    master-code-dir: /etc/puppetlabs/code
+    master-var-dir: /var/cache/puppetlabs/vardir
+    master-run-dir: /var/run/puppetlabs/puppetserver
+    master-log-dir: /var/log/puppetlabs/puppetserver
+    max-active-instances: 1
+    max-requests-per-instance: 0
+}
+http-client: {
+}
+bolt: {
+    projects-dir: "/etc/puppetlabs/code/projects"
+}
+dropsonde: {
+    enabled: false
+}
+`
+	bootstrapScript := fmt.Sprintf(`#!/bin/sh
+set -e
+CADIR=/var/cache/puppetlabs/ca
+SSLDIR=/var/cache/puppetlabs/ssldir
+VARDATA=/var/cache/puppetlabs/vardir
+CERTNAME=%q
+
+mkdir -p "$CADIR/requests" "$CADIR/signed" "$CADIR/private"
+mkdir -p "$SSLDIR/certs" "$SSLDIR/private_keys" "$SSLDIR/public_keys" "$SSLDIR/certificate_requests" "$SSLDIR/private"
+mkdir -p "$VARDATA"
+chmod 0750 "$CADIR/private" "$SSLDIR/private_keys" "$SSLDIR/private"
+
+# Disaster-Recovery-Safe Check: only seed CA files if ca_crt.pem does not already exist on the PVC
+if [ ! -f "$CADIR/ca_crt.pem" ]; then
+  cp /etc/puppetlabs/puppet/ssl-certs/ca.crt "$CADIR/ca_crt.pem"
+  cp /etc/puppetlabs/puppet/ssl-certs/ca.key "$CADIR/ca_key.pem"
+  cp /etc/puppetlabs/puppet/ssl-certs/ca.pub "$CADIR/ca_pub.pem"
+  cp /etc/puppetlabs/puppet/ssl-certs/crl.pem "$CADIR/ca_crl.pem"
+  cp /etc/puppetlabs/puppet/ssl-certs/crl.pem "$CADIR/infra_crl.pem"
+  cp /etc/puppetlabs/puppet/ssl-certs/tls.crt "$CADIR/signed/${CERTNAME}.pem"
+  printf "0003" > "$CADIR/serial"
+  printf "0x0002 2025-01-01T00:00:00UTC 2035-01-01T00:00:00UTC /CN=%%s\n" "$CERTNAME" > "$CADIR/inventory.txt"
+  : > "$CADIR/infra_inventory.txt"
+  : > "$CADIR/infra_serials"
+  chmod 0640 "$CADIR/ca_key.pem"
+fi
+
+cp "$CADIR/ca_crt.pem" "$SSLDIR/certs/ca.pem"
+cp "$CADIR/ca_crl.pem" "$SSLDIR/crl.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/tls.crt "$SSLDIR/certs/${CERTNAME}.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/tls.key "$SSLDIR/private_keys/${CERTNAME}.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/tls.pub "$SSLDIR/public_keys/${CERTNAME}.pem"
+chmod 0640 "$SSLDIR/private_keys/${CERTNAME}.pem"
+`, certname)
+
+	caCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      caCMName,
+			Namespace: cluster.Namespace,
+			Labels:    voxClusterLabels(cluster.Name, "ca"),
+		},
+		Data: map[string]string{
+			"webserver.conf":    webserverConf,
+			"ca.cfg":            caCfg,
+			"puppet.conf":       puppetConf,
+			"puppetserver.conf": puppetserverConf,
+			"bootstrap-ca.sh":   bootstrapScript,
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, caCM, r.Scheme); err != nil {
+		return "", err
+	}
+	if err := r.createOrUpdateConfigMap(ctx, caCM); err != nil {
+		return "", err
+	}
+
+	img := cluster.Spec.Server.Image
+	if img == "" {
+		img = "ghcr.io/yboikov/openvox-server:latest"
+	}
+	javaArgs := "-Xms256m -Xmx384m"
+
+	caSTS := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      caName,
+			Namespace: cluster.Namespace,
+			Labels:    voxClusterLabels(cluster.Name, "ca"),
+		},
+		Spec: appsv1.StatefulSetSpec{
+			ServiceName: caName,
+			Replicas:    new(int32(1)),
+			Selector: &metav1.LabelSelector{
+				MatchLabels: voxClusterLabels(cluster.Name, "ca"),
+			},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: voxClusterLabels(cluster.Name, "ca"),
+				},
+				Spec: corev1.PodSpec{
+					SecurityContext: buildOpenShiftPodSecurityContext(cluster.Spec.Server.SecurityContext),
+					InitContainers: []corev1.Container{
+						{
+							Name:            "ca-init",
+							Image:           img,
+							ImagePullPolicy: cluster.Spec.Server.ImagePullPolicy,
+							Command:         []string{"/bin/sh", "/etc/puppetlabs/ca-bootstrap/bootstrap-ca.sh"},
+							SecurityContext: buildRestrictedContainerSecurityContext(),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
+								{Name: "ca-config", MountPath: "/etc/puppetlabs/ca-bootstrap", ReadOnly: true},
+								{Name: "ca-data", MountPath: "/var/cache/puppetlabs"},
+							},
+						},
+					},
+					Containers: []corev1.Container{
+						{
+							Name:            "openvox-ca",
+							Image:           img,
+							ImagePullPolicy: cluster.Spec.Server.ImagePullPolicy,
+							SecurityContext: buildRestrictedContainerSecurityContext(),
+							Env: []corev1.EnvVar{
+								{Name: "JAVA_ARGS", Value: javaArgs},
+							},
+							Ports: []corev1.ContainerPort{
+								{Name: "puppet-ca", ContainerPort: 8140, Protocol: corev1.ProtocolTCP},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
+								{Name: "ca-config", MountPath: "/etc/puppetlabs/puppetserver/conf.d/webserver.conf", SubPath: "webserver.conf", ReadOnly: true},
+								{Name: "ca-config", MountPath: "/etc/puppetlabs/puppetserver/conf.d/puppetserver.conf", SubPath: "puppetserver.conf", ReadOnly: true},
+								{Name: "ca-config", MountPath: "/etc/puppetlabs/puppetserver/services.d/ca.cfg", SubPath: "ca.cfg", ReadOnly: true},
+								{Name: "ca-config", MountPath: "/etc/puppetlabs/puppet/puppet.conf", SubPath: "puppet.conf", ReadOnly: true},
+								{Name: "ca-data", MountPath: "/var/cache/puppetlabs"},
+								{Name: "ca-log", MountPath: "/var/log/puppetlabs"},
+								{Name: "ca-run", MountPath: "/var/run/puppetlabs"},
+								{Name: "ca-code", MountPath: "/etc/puppetlabs/code"},
+							},
+						},
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "ca-tls",
+							VolumeSource: corev1.VolumeSource{
+								Secret: &corev1.SecretVolumeSource{SecretName: caSecretName},
+							},
+						},
+						{
+							Name: "ca-config",
+							VolumeSource: corev1.VolumeSource{
+								ConfigMap: &corev1.ConfigMapVolumeSource{
+									LocalObjectReference: corev1.LocalObjectReference{Name: caCMName},
+								},
+							},
+						},
+						{
+							Name: "ca-data",
+							VolumeSource: corev1.VolumeSource{
+								PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+									ClaimName: pvcName,
+								},
+							},
+						},
+						{
+							Name: "ca-log",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						{
+							Name: "ca-run",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						{
+							Name: "ca-code",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, caSTS, r.Scheme); err != nil {
+		return "", err
+	}
+	if err := r.createOrUpdateStatefulSet(ctx, caSTS); err != nil {
+		return "", err
+	}
+
+	caSvc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      caName,
+			Namespace: cluster.Namespace,
+			Labels:    voxClusterLabels(cluster.Name, "ca"),
+		},
+		Spec: corev1.ServiceSpec{
+			Selector: voxClusterLabels(cluster.Name, "ca"),
+			Ports: []corev1.ServicePort{
+				{Name: "https-ca", Port: 8140, TargetPort: intstr.FromInt32(8140), Protocol: corev1.ProtocolTCP},
+			},
+		},
+	}
+	if err := controllerutil.SetControllerReference(cluster, caSvc, r.Scheme); err != nil {
+		return "", err
+	}
+	if err := r.createOrUpdateService(ctx, caSvc); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8140", caName, cluster.Namespace), nil
 }
 
 func (r *VoxClusterReconciler) reconcileGitCodeSync(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (string, error) {
@@ -468,7 +783,7 @@ access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
 	dbDeployName := fmt.Sprintf("%s-db", cluster.Name)
 	dbImg := cluster.Spec.Database.Image
 	if dbImg == "" {
-		dbImg = "ghcr.io/slauger/openvox-db:latest"
+		dbImg = "ghcr.io/yboikov/openvox-db:latest"
 	}
 	dbReplicas := int32(1)
 	if cluster.Spec.Database.Replicas != nil {
@@ -645,7 +960,7 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(
 	}
 	img := cluster.Spec.Server.Image
 	if img == "" {
-		img = "ghcr.io/slauger/openvox-server:latest"
+		img = "ghcr.io/yboikov/openvox-server:latest"
 	}
 	javaArgs := cluster.Spec.Server.JavaArgs
 	if javaArgs == "" {
@@ -1014,7 +1329,19 @@ func (r *VoxClusterReconciler) createOrUpdateConfigMap(ctx context.Context, desi
 	return nil
 }
 
+func specHash(v interface{}) string {
+	b, _ := json.Marshal(v)
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func (r *VoxClusterReconciler) createOrUpdateDeployment(ctx context.Context, desired *appsv1.Deployment) error {
+	h := specHash(desired.Spec)
+	if desired.Annotations == nil {
+		desired.Annotations = make(map[string]string)
+	}
+	desired.Annotations["voxkube.io/spec-hash"] = h
+
 	existing := &appsv1.Deployment{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}, existing)
 	if apierrors.IsNotFound(err) {
@@ -1023,12 +1350,25 @@ func (r *VoxClusterReconciler) createOrUpdateDeployment(ctx context.Context, des
 	if err != nil {
 		return err
 	}
+	if existing.Annotations["voxkube.io/spec-hash"] == h && reflect.DeepEqual(existing.Labels, desired.Labels) {
+		return nil
+	}
+	if existing.Annotations == nil {
+		existing.Annotations = make(map[string]string)
+	}
+	existing.Annotations["voxkube.io/spec-hash"] = h
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels
 	return r.Update(ctx, existing)
 }
 
 func (r *VoxClusterReconciler) createOrUpdateStatefulSet(ctx context.Context, desired *appsv1.StatefulSet) error {
+	h := specHash(desired.Spec)
+	if desired.Annotations == nil {
+		desired.Annotations = make(map[string]string)
+	}
+	desired.Annotations["voxkube.io/spec-hash"] = h
+
 	existing := &appsv1.StatefulSet{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}, existing)
 	if apierrors.IsNotFound(err) {
@@ -1037,12 +1377,25 @@ func (r *VoxClusterReconciler) createOrUpdateStatefulSet(ctx context.Context, de
 	if err != nil {
 		return err
 	}
+	if existing.Annotations["voxkube.io/spec-hash"] == h && reflect.DeepEqual(existing.Labels, desired.Labels) {
+		return nil
+	}
+	if existing.Annotations == nil {
+		existing.Annotations = make(map[string]string)
+	}
+	existing.Annotations["voxkube.io/spec-hash"] = h
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels
 	return r.Update(ctx, existing)
 }
 
 func (r *VoxClusterReconciler) createOrUpdateService(ctx context.Context, desired *corev1.Service) error {
+	h := specHash(desired.Spec)
+	if desired.Annotations == nil {
+		desired.Annotations = make(map[string]string)
+	}
+	desired.Annotations["voxkube.io/spec-hash"] = h
+
 	existing := &corev1.Service{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: desired.Namespace, Name: desired.Name}, existing)
 	if apierrors.IsNotFound(err) {
@@ -1051,6 +1404,13 @@ func (r *VoxClusterReconciler) createOrUpdateService(ctx context.Context, desire
 	if err != nil {
 		return err
 	}
+	if existing.Annotations["voxkube.io/spec-hash"] == h && reflect.DeepEqual(existing.Labels, desired.Labels) {
+		return nil
+	}
+	if existing.Annotations == nil {
+		existing.Annotations = make(map[string]string)
+	}
+	existing.Annotations["voxkube.io/spec-hash"] = h
 	desired.Spec.ClusterIP = existing.Spec.ClusterIP
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels

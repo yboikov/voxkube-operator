@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -187,23 +189,26 @@ func GenerateSelfSignedCA(commonName string, duration time.Duration) (certPEM, k
 		return nil, nil, err
 	}
 
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 	if err != nil {
 		return nil, nil, err
 	}
+	ski := sha1.Sum(pubDER)
 
+	serial := big.NewInt(1)
 	now := time.Now().UTC()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   commonName,
-			Organization: []string{"VoxKube OpenVox CA"},
+			CommonName: commonName,
 		},
 		NotBefore:             now.Add(-5 * time.Minute),
 		NotAfter:              now.Add(duration),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
+		SubjectKeyId:          ski[:],
+		AuthorityKeyId:        ski[:],
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
@@ -214,6 +219,63 @@ func GenerateSelfSignedCA(commonName string, duration time.Duration) (certPEM, k
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
 	return certPEM, keyPEM, nil
+}
+
+// ExtractPublicKeyPEM extracts the PKIX PUBLIC KEY PEM from an RSA PRIVATE KEY PEM.
+func ExtractPublicKeyPEM(keyPEM []byte) ([]byte, error) {
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode private key PEM")
+	}
+	priv, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}), nil
+}
+
+// GenerateCAArtifacts derives the PEM-encoded public key (ca_pub.pem) and X.509 v2 CRL (ca_crl.pem) from a CA cert/key pair.
+func GenerateCAArtifacts(caCertPEM, caKeyPEM []byte) (pubPEM, crlPEM []byte, err error) {
+	caCertBlock, _ := pem.Decode(caCertPEM)
+	if caCertBlock == nil {
+		return nil, nil, fmt.Errorf("failed to decode CA certificate PEM")
+	}
+	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caKeyBlock, _ := pem.Decode(caKeyPEM)
+	if caKeyBlock == nil {
+		return nil, nil, fmt.Errorf("failed to decode CA private key PEM")
+	}
+	caKey, err := x509.ParsePKCS1PrivateKey(caKeyBlock.Bytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	pubDER, err := x509.MarshalPKIXPublicKey(&caKey.PublicKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	pubPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+
+	now := time.Now().UTC()
+	crlTmpl := &x509.RevocationList{
+		Number:     big.NewInt(1),
+		ThisUpdate: now.Add(-5 * time.Minute),
+		NextUpdate: now.Add(5 * 365 * 24 * time.Hour),
+	}
+	crlDER, err := x509.CreateRevocationList(rand.Reader, crlTmpl, caCert, caKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	crlPEM = pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: crlDER})
+	return pubPEM, crlPEM, nil
 }
 
 // IssueClientCertificate signs a leaf certificate (e.g., prometheus-scraper or compiler TLS) using the cluster CA.
@@ -241,23 +303,35 @@ func IssueClientCertificate(caCertPEM, caKeyPEM []byte, commonName string, dnsNa
 		return nil, nil, err
 	}
 
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 	if err != nil {
 		return nil, nil, err
 	}
+	ski := sha1.Sum(pubDER)
 
+	// Puppet pp_cli_auth OID (1.3.6.1.4.1.34380.1.3.39) = UTF8String("true")
+	cliAuthVal, _ := asn1.Marshal("true")
+
+	serial := big.NewInt(2)
 	now := time.Now().UTC()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   commonName,
-			Organization: []string{"VoxKube"},
+			CommonName: commonName,
 		},
-		DNSNames:    dnsNames,
-		NotBefore:   now.Add(-5 * time.Minute),
-		NotAfter:    now.Add(duration),
-		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		DNSNames:       dnsNames,
+		NotBefore:      now.Add(-5 * time.Minute),
+		NotAfter:       now.Add(duration),
+		KeyUsage:       x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:    []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		SubjectKeyId:   ski[:],
+		AuthorityKeyId: caCert.SubjectKeyId,
+		ExtraExtensions: []pkix.Extension{
+			{
+				Id:    asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 34380, 1, 3, 39},
+				Value: cliAuthVal,
+			},
+		},
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &priv.PublicKey, caKey)
