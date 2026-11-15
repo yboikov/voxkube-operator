@@ -1,6 +1,7 @@
 # Stage 1: Build g10k binary for Git environment synchronization
-FROM docker.io/library/golang:1.24 AS g10k-builder
+FROM docker.io/library/golang:latest AS g10k-builder
 ARG TARGETARCH
+ENV GOTOOLCHAIN=auto
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/xorpaul/g10k@latest
 
 # Stage 2: Install OpenVox Server from official Vox Pupuli RPM repository
