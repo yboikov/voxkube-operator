@@ -94,10 +94,10 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		nodes, err := r.DBClient.QueryActiveNodes(ctx, dbURL, disc.Spec.Selector)
 		if err != nil {
-			logger.Error(err, "failed to query PuppetDB inventory for VoxDiscovery")
-			return ctrl.Result{}, err
+			logger.Info("PuppetDB inventory not yet reachable; reconciling empty EndpointSlice and requeuing", "dbURL", dbURL, "reason", err.Error())
+		} else {
+			activeNodes = nodes
 		}
-		activeNodes = nodes
 	}
 
 	// Also filter out any VoxNode in the namespace that is explicitly Decommissioned or Revoked

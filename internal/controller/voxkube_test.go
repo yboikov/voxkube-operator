@@ -211,7 +211,7 @@ func TestHieraBridge_MultiCertAndESOSensitiveRendering(t *testing.T) {
 	// Two cert-manager TLS Secrets for web01.example.com
 	cert1Sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "voxnode-cert-web01-public_web",
+			Name:      "voxnode-cert-web01-public-web",
 			Namespace: "openvox",
 		},
 		Data: map[string][]byte{
@@ -221,7 +221,7 @@ func TestHieraBridge_MultiCertAndESOSensitiveRendering(t *testing.T) {
 	}
 	cert2Sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "voxnode-cert-web01-internal_api",
+			Name:      "voxnode-cert-web01-internal-api",
 			Namespace: "openvox",
 		},
 		Data: map[string][]byte{

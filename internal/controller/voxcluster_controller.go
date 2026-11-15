@@ -763,14 +763,8 @@ func (r *VoxClusterReconciler) reconcileNetworking(ctx context.Context, cluster 
 				return "", err
 			}
 		}
-		if host != "" {
-			return fmt.Sprintf("https://%s:8140", host), nil
-		}
 	}
 
-	if cluster.Spec.Networking.ExternalHostname != "" {
-		return fmt.Sprintf("https://%s:8140", cluster.Spec.Networking.ExternalHostname), nil
-	}
 	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8140", cluster.Name, cluster.Namespace), nil
 }
 

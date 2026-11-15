@@ -190,12 +190,12 @@ func RenderHieraSecretsBundle(
 	return bundle, nil
 }
 
-// CertManagerSecretName returns the deterministic TLS Secret name for a VoxNode certificate request.
+// CertManagerSecretName returns the deterministic RFC 1123 compliant TLS Secret name for a VoxNode certificate request.
 func CertManagerSecretName(node *openvoxv1alpha1.VoxNode, req openvoxv1alpha1.CertManagerCertRequest) string {
 	if req.SecretName != "" {
 		return req.SecretName
 	}
-	return fmt.Sprintf("voxnode-cert-%s-%s", node.Name, req.Name)
+	return fmt.Sprintf("voxnode-cert-%s-%s", sanitizeDNSLabel(node.Name), sanitizeDNSLabel(req.Name))
 }
 
 func matchesHieraLabelSelector(sec *corev1.Secret, customSelector map[string]string) bool {

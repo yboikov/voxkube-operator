@@ -173,10 +173,12 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if r.CAClient != nil {
 		fp, err := r.CAClient.SignCSR(ctx, cluster.Status.ServerURL, node.Spec.Certname)
 		if err != nil {
-			return ctrl.Result{}, err
+			logger.Info("OpenVox CA not yet reachable for CSR signing; continuing ENC and Hiera sync", "certname", node.Spec.Certname, "reason", err.Error())
+		} else {
+			fingerprint = fp
 		}
-		fingerprint = fp
-	} else if fingerprint == "" {
+	}
+	if fingerprint == "" {
 		fingerprint = "sha256:signed-" + node.Spec.Certname
 	}
 
@@ -216,16 +218,17 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 }
 
 func (r *VoxNodeReconciler) decommissionNode(ctx context.Context, node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) error {
+	logger := log.FromContext(ctx)
 	// 1. Revoke and clean node certificate from OpenVox CA (PUT /puppet-ca/v1/clean)
 	if r.CAClient != nil {
 		if err := r.CAClient.CleanNode(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
-			return err
+			logger.Info("OpenVox CA not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}
 	// 2. Deactivate node in OpenVox DB / PuppetDB (POST /pdb/cmd/v1 -> deactivate node)
 	if r.DBClient != nil {
 		if err := r.DBClient.DeactivateNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname); err != nil {
-			return err
+			logger.Info("OpenVox DB not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}
 	// 3. Delete any cert-manager Certificates owned by this node
