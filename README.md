@@ -39,33 +39,33 @@ Running Puppet / OpenVox inside Kubernetes or OpenShift traditionally hits four 
 ## How It Works
 
 ```mermaid
-graph TD
-    subgraph "Your YAML Manifests (voxkube.io/v1alpha1)"
+flowchart TD
+    subgraph inputs["Your YAML Manifests - voxkube.io/v1alpha1"]
         VC["VoxCluster (kubectl get vc)"]
         VN["VoxNode (kubectl get vn)"]
         VD["VoxDiscovery (kubectl get vd)"]
     end
 
-    subgraph "OpenVox Stack in Kubernetes / OpenShift"
-        CA["<cluster>-ca-0 (StatefulSet :8140)<br/>+ <cluster>-ca-data PVC (RWO)"]
-        SRV["<cluster>-server (Deployment :8140)<br/>2..N Stateless Catalog Compilers<br/>+ ENC & Hiera Secrets"]
-        DB["<cluster>-db (OpenVox DB :8080/:8081)<br/>+ <cluster>-postgres"]
-        EPS["Kubernetes EndpointSlices<br/>+ Prometheus ServiceMonitor"]
+    subgraph stack["OpenVox Stack in Kubernetes and OpenShift"]
+        CA["production-ca-0 (StatefulSet :8140) + production-ca-data PVC (RWO)"]
+        SRV["production-server (Deployment :8140) - 2..N Stateless Compilers + ENC + Hiera"]
+        DB["production-db (OpenVox DB :8080/:8081) + production-postgres"]
+        EPS["Kubernetes EndpointSlices + Prometheus ServiceMonitor"]
     end
 
-    subgraph "Managed Client VMs / Pods"
+    subgraph clients["Managed Client VMs and Pods"]
         VM["OpenVox Agent (puppet agent -t)"]
     end
 
-    VC -->|reconciles| CA
-    VC -->|reconciles| SRV
-    VC -->|reconciles| DB
-    VN -->|signs CSR / cleans cert| CA
-    VN -->|injects ENC & Hiera data| SRV
-    VD -->|queries inventory| DB
-    VD -->|exports IPs| EPS
-    VM -->|1. ca_server :8140 (CSR & Cert)| CA
-    VM -->|2. server :8140 (Catalog)| SRV
+    VC -->|"reconciles"| CA
+    VC -->|"reconciles"| SRV
+    VC -->|"reconciles"| DB
+    VN -->|"signs CSR / cleans cert"| CA
+    VN -->|"injects ENC and Hiera"| SRV
+    VD -->|"queries inventory"| DB
+    VD -->|"exports IPs"| EPS
+    VM -->|"1. ca_server :8140 - CSR and Cert"| CA
+    VM -->|"2. server :8140 - Catalog"| SRV
 ```
 
 ---
