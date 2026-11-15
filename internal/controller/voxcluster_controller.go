@@ -967,7 +967,8 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(
 		javaArgs = "-Xms1g -Xmx1g"
 	}
 
-	// Reconcile Server ConfigMap (webserver.conf, ca.cfg, puppet.conf, puppetserver.conf) so JRuby/Jetty uses mounted Secret certs and writable subdirectory paths
+	// Reconcile Server ConfigMap (webserver.conf, ca.cfg, puppet.conf, puppetserver.conf, enc.sh, hiera.yaml, bootstrap-server.sh)
+	certname := fmt.Sprintf("%s.%s.svc", cluster.Name, cluster.Namespace)
 	srvCMName := fmt.Sprintf("%s-server-config", cluster.Name)
 	webserverConf := `webserver: {
     access-log-config: /etc/puppetlabs/puppetserver/request-logging.xml
@@ -977,19 +978,84 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(
     ssl-cert: /etc/puppetlabs/puppet/ssl-certs/tls.crt
     ssl-key: /etc/puppetlabs/puppet/ssl-certs/tls.key
     ssl-ca-cert: /etc/puppetlabs/puppet/ssl-certs/ca.crt
+    ssl-crl-path: /etc/puppetlabs/puppet/ssl-certs/crl.pem
 }
 `
 	caCfg := `puppetlabs.services.ca.certificate-authority-disabled-service/certificate-authority-disabled-service
 puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-watch-service
 `
-	puppetConf := `[main]
+	puppetConf := fmt.Sprintf(`[main]
+certname = %s
 confdir = /etc/puppetlabs/puppet
 codedir = /etc/puppetlabs/code
 vardir = /var/cache/puppetlabs/vardir
 logdir = /var/log/puppetlabs/puppetserver
 rundir = /var/run/puppetlabs/puppetserver
 ssldir = /var/cache/puppetlabs/ssldir
+hiera_config = /etc/puppetlabs/puppet/hiera.yaml
+
+[master]
+node_terminus = exec
+external_nodes = /etc/puppetlabs/puppet/enc.sh
+`, certname)
+	encScript := fmt.Sprintf(`#!/bin/sh
+CERTNAME="$1"
+if [ -f "/etc/puppetlabs/puppet/enc-nodes/${CERTNAME}.yaml" ]; then
+  cat "/etc/puppetlabs/puppet/enc-nodes/${CERTNAME}.yaml"
+  exit 0
+fi
+printf "environment: production\nclasses: []\nparameters:\n  voxkube_cluster: %%s\n" %q
+`, cluster.Name)
+	hieraYAML := `---
+version: 5
+defaults:
+  datadir: /etc/puppetlabs/puppet/hiera-secrets
+  data_hash: yaml_data
+hierarchy:
+  - name: "Per-node Kubernetes Secrets & Certificates"
+    path: "nodes_%{trusted.certname}.yaml"
+  - name: "Role-scoped Kubernetes Secrets"
+    path: "roles_%{role}.yaml"
+  - name: "Common Cluster Kubernetes Secrets"
+    path: "common.yaml"
 `
+	bootstrapServerScript := fmt.Sprintf(`#!/bin/sh
+set -e
+SSLDIR=/var/cache/puppetlabs/ssldir
+mkdir -p "$SSLDIR/certs" "$SSLDIR/private_keys" "$SSLDIR/public_keys" "$SSLDIR/certificate_requests" "$SSLDIR/private"
+cp /etc/puppetlabs/puppet/ssl-certs/ca.crt "$SSLDIR/certs/ca.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/crl.pem "$SSLDIR/crl.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/tls.crt "$SSLDIR/certs/%s.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/tls.key "$SSLDIR/private_keys/%s.pem"
+cp /etc/puppetlabs/puppet/ssl-certs/tls.pub "$SSLDIR/public_keys/%s.pem"
+chmod 0640 "$SSLDIR/private_keys/%s.pem"
+
+ENVDIR=/etc/puppetlabs/code/environments/production
+if [ ! -f "$ENVDIR/manifests/site.pp" ]; then
+  mkdir -p "$ENVDIR/manifests" "$ENVDIR/modules/profile/manifests"
+  cat <<'SITEPP' > "$ENVDIR/manifests/site.pp"
+node default {
+  $msg = pick($facts['voxkube_welcome'], getvar('welcome_message'), 'Managed by VoxKube Operator')
+  file { '/etc/voxkube-node.txt':
+    ensure  => file,
+    content => "Node: ${trusted['certname']}\nCluster: ${getvar('voxkube_cluster')}\nRole: ${getvar('role')}\nMessage: ${msg}\n",
+    mode    => '0644',
+  }
+}
+SITEPP
+  cat <<'NGINXPP' > "$ENVDIR/modules/profile/manifests/nginx.pp"
+class profile::nginx {
+  $port = pick(getvar('http_port'), '80')
+  $msg  = pick(getvar('welcome_message'), 'Welcome to VoxKube')
+  file { '/etc/voxkube-nginx.conf':
+    ensure  => file,
+    content => "# Managed by VoxKube OpenVox Operator\nserver {\n  listen ${port};\n  server_name ${trusted['certname']};\n  # ${msg}\n}\n",
+    mode    => '0644',
+  }
+}
+NGINXPP
+fi
+`, certname, certname, certname, certname)
 	maxActive := cluster.Spec.Server.MaxActiveInstances
 	if maxActive == 0 {
 		maxActive = 1
@@ -1023,10 +1089,13 @@ dropsonde: {
 			Labels:    voxClusterLabels(cluster.Name, "server"),
 		},
 		Data: map[string]string{
-			"webserver.conf":    webserverConf,
-			"ca.cfg":            caCfg,
-			"puppet.conf":       puppetConf,
-			"puppetserver.conf": puppetserverConf,
+			"webserver.conf":      webserverConf,
+			"ca.cfg":              caCfg,
+			"puppet.conf":         puppetConf,
+			"puppetserver.conf":   puppetserverConf,
+			"enc.sh":              encScript,
+			"hiera.yaml":          hieraYAML,
+			"bootstrap-server.sh": bootstrapServerScript,
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, srvCM, r.Scheme); err != nil {
@@ -1044,6 +1113,7 @@ dropsonde: {
 		podAnnotations["voxkube.io/global-noop"] = "true"
 	}
 
+	srvConfigMode := int32(0755)
 	volumes := []corev1.Volume{
 		{
 			Name: "ca-tls",
@@ -1056,6 +1126,7 @@ dropsonde: {
 			VolumeSource: corev1.VolumeSource{
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					LocalObjectReference: corev1.LocalObjectReference{Name: srvCMName},
+					DefaultMode:          &srvConfigMode,
 				},
 			},
 		},
@@ -1099,6 +1170,8 @@ dropsonde: {
 		{Name: "server-config", MountPath: "/etc/puppetlabs/puppetserver/conf.d/puppetserver.conf", SubPath: "puppetserver.conf", ReadOnly: true},
 		{Name: "server-config", MountPath: "/etc/puppetlabs/puppetserver/services.d/ca.cfg", SubPath: "ca.cfg", ReadOnly: true},
 		{Name: "server-config", MountPath: "/etc/puppetlabs/puppet/puppet.conf", SubPath: "puppet.conf", ReadOnly: true},
+		{Name: "server-config", MountPath: "/etc/puppetlabs/puppet/enc.sh", SubPath: "enc.sh", ReadOnly: true},
+		{Name: "server-config", MountPath: "/etc/puppetlabs/puppet/hiera.yaml", SubPath: "hiera.yaml", ReadOnly: true},
 		{Name: "puppetserver-cache", MountPath: "/var/cache/puppetlabs"},
 		{Name: "puppetserver-log", MountPath: "/var/log/puppetlabs"},
 		{Name: "puppetserver-run", MountPath: "/var/run/puppetlabs"},
@@ -1166,6 +1239,20 @@ dropsonde: {
 			},
 		})
 	}
+
+	initContainers = append(initContainers, corev1.Container{
+		Name:            "server-init",
+		Image:           img,
+		ImagePullPolicy: cluster.Spec.Server.ImagePullPolicy,
+		Command:         []string{"/bin/sh", "/etc/puppetlabs/puppet/bootstrap-server.sh"},
+		SecurityContext: buildRestrictedContainerSecurityContext(),
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
+			{Name: "server-config", MountPath: "/etc/puppetlabs/puppet/bootstrap-server.sh", SubPath: "bootstrap-server.sh", ReadOnly: true},
+			{Name: "puppetserver-cache", MountPath: "/var/cache/puppetlabs"},
+			{Name: "puppet-code", MountPath: "/etc/puppetlabs/code"},
+		},
+	})
 
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1444,6 +1531,10 @@ func (r *VoxClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Secret{}).
 		Watches(
 			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findClustersForSecret),
+		).
+		Watches(
+			&openvoxv1alpha1.VoxNode{},
 			handler.EnqueueRequestsFromMapFunc(r.findClustersForSecret),
 		).
 		Complete(r)
