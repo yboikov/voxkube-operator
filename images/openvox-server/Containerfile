@@ -2,7 +2,7 @@
 FROM docker.io/library/golang:latest AS g10k-builder
 ARG TARGETARCH
 ENV GOTOOLCHAIN=auto
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/xorpaul/g10k@latest
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/xorpaul/g10k/cmd/g10k@latest
 
 # Stage 2: Install OpenVox Server from official Vox Pupuli RPM repository
 FROM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
