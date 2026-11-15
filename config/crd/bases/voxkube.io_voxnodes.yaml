@@ -1,0 +1,315 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: voxnodes.voxkube.io
+spec:
+  group: voxkube.io
+  names:
+    kind: VoxNode
+    listKind: VoxNodeList
+    plural: voxnodes
+    shortNames:
+    - vn
+    singular: voxnode
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterRef
+      name: Cluster
+      type: string
+    - jsonPath: .spec.certname
+      name: Certname
+      type: string
+    - jsonPath: .spec.classification.role
+      name: Role
+      type: string
+    - jsonPath: .spec.state
+      name: State
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyCertificates
+      name: Certs
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VoxNode is the Schema for the voxnodes API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VoxNodeSpec defines the desired state of a VoxNode.
+            properties:
+              certificates:
+                description: Certificates requests one or more cert-manager SSL certificates
+                  for this VM and injects them into Hiera.
+                items:
+                  description: CertManagerCertRequest defines a cert-manager SSL certificate
+                    to issue and inject into Hiera for this VM.
+                  properties:
+                    dnsNames:
+                      description: DNSNames is the list of DNS SANs for the certificate.
+                      items:
+                        type: string
+                      type: array
+                    duration:
+                      default: 2160h
+                      description: Duration is the requested certificate validity
+                        period (e.g., "2160h" for 90d).
+                      type: string
+                    ipAddresses:
+                      description: IPAddresses is the list of IP SANs for the certificate.
+                      items:
+                        type: string
+                      type: array
+                    issuerRef:
+                      description: IssuerRef references the cert-manager Issuer or
+                        ClusterIssuer used to sign this certificate.
+                      properties:
+                        group:
+                          default: cert-manager.io
+                          description: Group is the API group of the issuer (defaults
+                            to cert-manager.io).
+                          type: string
+                        kind:
+                          default: ClusterIssuer
+                          description: Kind is either "Issuer" or "ClusterIssuer".
+                          enum:
+                          - Issuer
+                          - ClusterIssuer
+                          type: string
+                        name:
+                          description: Name of the Issuer or ClusterIssuer.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    name:
+                      description: |-
+                        Name is the logical identifier for this certificate (e.g., "public_web", "internal_api").
+                        Injected into Hiera under openvox::certs[name] and certs::<name>::tls_crt / tls_key.
+                      type: string
+                    renewBefore:
+                      default: 720h
+                      description: RenewBefore is how long before expiry cert-manager
+                        should renew the certificate.
+                      type: string
+                    secretName:
+                      description: SecretName overrides the generated Kubernetes TLS
+                        Secret name if already created externally.
+                      type: string
+                    targetCertPath:
+                      description: TargetCertPath is an optional file path on the
+                        VM where Puppet should place tls.crt.
+                      type: string
+                    targetKeyPath:
+                      description: TargetKeyPath is an optional file path on the VM
+                        where Puppet should place tls.key.
+                      type: string
+                  required:
+                  - issuerRef
+                  - name
+                  type: object
+                type: array
+              certname:
+                description: Certname is the Puppet agent certificate name (FQDN)
+                  of the VM/client.
+                type: string
+              classification:
+                description: Classification defines the Kubernetes-native ENC classification
+                  for this node.
+                properties:
+                  classes:
+                    description: Classes is the list of Puppet classes to include
+                      on this node.
+                    items:
+                      type: string
+                    type: array
+                  environment:
+                    default: production
+                    description: Environment is the Puppet environment assigned to
+                      this node (e.g., "production", "staging").
+                    type: string
+                  parameters:
+                    additionalProperties:
+                      x-kubernetes-preserve-unknown-fields: true
+                    description: Parameters are top-scope ENC parameters passed to
+                      Puppet for this node.
+                    type: object
+                  role:
+                    description: |-
+                      Role is the high-level role assigned to this node (e.g., "webserver", "database").
+                      Automatically unlocks Hiera secrets labeled with voxkube.io/hiera-role=<role>.
+                    type: string
+                type: object
+              clusterRef:
+                description: ClusterRef is the name of the VoxCluster managing this
+                  node.
+                type: string
+              secrets:
+                description: Secrets maps node-specific ESO / Kubernetes Secrets into
+                  this VM's Hiera hierarchy.
+                items:
+                  description: NodeSecretRef maps a Kubernetes Secret (e.g. synced
+                    by External Secrets Operator) into this node's Hiera data.
+                  properties:
+                    hieraPrefix:
+                      description: HieraPrefix is the Hiera key prefix under which
+                        the Secret's keys will be injected (e.g. "nginx::basic_auth").
+                      type: string
+                    secretName:
+                      description: SecretName is the name of the Kubernetes Secret
+                        in the same namespace.
+                      type: string
+                  required:
+                  - hieraPrefix
+                  - secretName
+                  type: object
+                type: array
+              state:
+                default: Active
+                description: State controls CSR signing, revocation, and atomic CA
+                  + PuppetDB decommissioning.
+                enum:
+                - PendingApproval
+                - Active
+                - Revoked
+                - Decommissioned
+                type: string
+            required:
+            - certname
+            - clusterRef
+            type: object
+          status:
+            description: VoxNodeStatus defines the observed state of a VoxNode.
+            properties:
+              caCleaned:
+                description: CACleaned indicates whether the node's certificate has
+                  been revoked and cleaned from the CA.
+                type: boolean
+              certificateFingerprint:
+                description: CertificateFingerprint is the SHA256 fingerprint of the
+                  signed Puppet agent certificate.
+                type: string
+              certificateSigned:
+                description: CertificateSigned indicates whether the node's Puppet
+                  agent CSR has been signed by the OpenVox CA.
+                type: boolean
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the VoxNode state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              lastReportStatus:
+                description: LastReportStatus is the status of the node's most recent
+                  Puppet run ("changed", "unchanged", "failed").
+                type: string
+              lastSeenTime:
+                description: LastSeenTime is the timestamp when the node last checked
+                  into PuppetDB.
+                format: date-time
+                type: string
+              phase:
+                description: Phase is the current lifecycle phase of the node.
+                enum:
+                - PendingCSR
+                - Signed
+                - Active
+                - Revoked
+                - Decommissioned
+                - Error
+                type: string
+              puppetDBDeactivated:
+                description: PuppetDBDeactivated indicates whether the node has been
+                  deactivated in OpenVox DB (PuppetDB).
+                type: boolean
+              readyCertificates:
+                description: ReadyCertificates is the count of cert-manager certificates
+                  ready and synced to Hiera for this node.
+                format: int32
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

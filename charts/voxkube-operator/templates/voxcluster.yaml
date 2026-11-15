@@ -1,0 +1,53 @@
+{{- if .Values.cluster.enabled -}}
+apiVersion: voxkube.io/v1alpha1
+kind: VoxCluster
+metadata:
+  name: {{ .Values.cluster.name | default "production" }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voxkube-operator.labels" . | nindent 4 }}
+spec:
+  code:
+    mode: {{ .Values.cluster.code.mode | default "git" }}
+    {{- if .Values.cluster.code.git.remote }}
+    git:
+      remote: {{ .Values.cluster.code.git.remote | quote }}
+      authType: {{ .Values.cluster.code.git.authType | default "githubApp" }}
+      pollInterval: {{ .Values.cluster.code.git.pollInterval | default "60s" }}
+      synchronizedRollout: {{ .Values.cluster.code.git.synchronizedRollout }}
+      generateTypes: {{ .Values.cluster.code.git.generateTypes }}
+    {{- end }}
+  server:
+    image: {{ .Values.cluster.server.image | default "ghcr.io/slauger/openvox-server:latest" | quote }}
+    replicas: {{ .Values.cluster.server.replicas | default 2 }}
+    javaArgs: {{ .Values.cluster.server.javaArgs | default "-Xms1g -Xmx1g" | quote }}
+  database:
+    enabled: {{ .Values.cluster.database.enabled }}
+    image: {{ .Values.cluster.database.image | default "ghcr.io/slauger/openvox-db:latest" | quote }}
+    postgres:
+      mode: {{ .Values.cluster.database.postgres.mode | default "builtin" }}
+      storageSize: {{ .Values.cluster.database.postgres.storageSize | default "10Gi" }}
+    housekeeping:
+      nodeTTL: {{ .Values.cluster.database.housekeeping.nodeTTL | default "7d" | quote }}
+      nodePurgeTTL: {{ .Values.cluster.database.housekeeping.nodePurgeTTL | default "14d" | quote }}
+      reportTTL: {{ .Values.cluster.database.housekeeping.reportTTL | default "14d" | quote }}
+      gcInterval: {{ .Values.cluster.database.housekeeping.gcInterval | default 60 }}
+  networking:
+    {{- if .Values.cluster.networking.externalHostname }}
+    externalHostname: {{ .Values.cluster.networking.externalHostname | quote }}
+    {{- end }}
+    serviceType: {{ .Values.cluster.networking.serviceType | default "ClusterIP" }}
+    {{- if .Values.cluster.networking.openShiftRoute.enabled }}
+    openShiftRoute:
+      enabled: true
+      {{- if .Values.cluster.networking.openShiftRoute.host }}
+      host: {{ .Values.cluster.networking.openShiftRoute.host | quote }}
+      {{- end }}
+    {{- end }}
+  hieraSecrets:
+    enabled: {{ .Values.cluster.hieraSecrets.enabled }}
+    {{- with .Values.cluster.hieraSecrets.commonSecrets }}
+    commonSecrets:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+{{- end }}

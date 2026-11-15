@@ -1,0 +1,56 @@
+# ==============================================================================
+# VoxKube (voxkube-operator) .gitignore
+# ==============================================================================
+
+# Go binaries and build outputs
+bin/
+dist/
+/manager
+/voxkube-operator
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test binary and coverage reports
+*.test
+*.out
+*.prof
+cover.out
+coverage.txt
+coverage.html
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Helm chart build artifacts
+charts/*/charts/
+*.tgz
+*.prov
+
+# Local Kubernetes / OpenShift kubeconfigs & secrets (never commit credentials!)
+kubeconfig*
+*.kubeconfig
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+
+# Editor / IDE / OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Local scratch / temporary directories
+tmp/
+.tmp/
+.cache/

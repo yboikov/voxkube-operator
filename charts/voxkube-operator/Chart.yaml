@@ -1,0 +1,32 @@
+apiVersion: v2
+name: voxkube-operator
+description: VoxKube - OpenShift & Kubernetes-native Operator for OpenVox and Puppet
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/yboikov/voxkube-operator
+keywords:
+  - voxkube
+  - openvox
+  - puppet
+  - openshift
+  - kubernetes
+  - operator
+  - cert-manager
+  - external-secrets
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operator: "true"
+  artifacthub.io/crds: |
+    - kind: VoxCluster
+      version: v1alpha1
+      name: voxclusters.voxkube.io
+      description: Single-manifest OpenVox stack (CA, Compilers, OpenVox DB, Postgres, Hiera Secret Bridge, Git/g10k)
+    - kind: VoxNode
+      version: v1alpha1
+      name: voxnodes.voxkube.io
+      description: Per-node lifecycle, CSR approval, Kubernetes ENC, cert-manager SSL certs, and atomic CA+PuppetDB cleanup
+    - kind: VoxDiscovery
+      version: v1alpha1
+      name: voxdiscoveries.voxkube.io
+      description: PuppetDB to Kubernetes EndpointSlice and mTLS Prometheus ServiceMonitor exporter

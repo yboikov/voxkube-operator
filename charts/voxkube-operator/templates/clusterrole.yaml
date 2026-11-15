@@ -1,0 +1,53 @@
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if eq .Values.scope.mode "namespace" }}
+kind: Role
+{{- else }}
+kind: ClusterRole
+{{- end }}
+metadata:
+  name: {{ include "voxkube-operator.fullname" . }}
+  {{- if eq .Values.scope.mode "namespace" }}
+  namespace: {{ .Values.scope.watchNamespace | default .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "voxkube-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["voxkube.io"]
+    resources: ["voxclusters", "voxnodes", "voxdiscoveries"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["voxkube.io"]
+    resources: ["voxclusters/status", "voxnodes/status", "voxdiscoveries/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["voxkube.io"]
+    resources: ["voxclusters/finalizers", "voxnodes/finalizers", "voxdiscoveries/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets", "services", "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["route.openshift.io"]
+    resources: ["routes", "routes/custom-host"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers", "clusterissuers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["monitoring.coreos.com"]
+    resources: ["servicemonitors"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

@@ -1,0 +1,681 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: voxclusters.voxkube.io
+spec:
+  group: voxkube.io
+  names:
+    kind: VoxCluster
+    listKind: VoxClusterList
+    plural: voxclusters
+    shortNames:
+    - vc
+    singular: voxcluster
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .status.observedCommit
+      name: Commit
+      type: string
+    - jsonPath: .status.serverURL
+      name: Server URL
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: VoxCluster is the Schema for the voxclusters API.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: VoxClusterSpec defines the desired state of a VoxCluster.
+            properties:
+              ca:
+                description: CA configures the OpenVox Certificate Authority.
+                properties:
+                  autosignMode:
+                    default: voxnode
+                    description: AutosignMode controls how incoming CSRs are signed.
+                    enum:
+                    - voxnode
+                    - psk
+                    - "off"
+                    - true
+                    type: string
+                  enabled:
+                    default: true
+                    description: Enabled controls whether the built-in OpenVox CA
+                      is managed.
+                    type: boolean
+                  pskSecretRef:
+                    description: PSKSecretRef references a Secret containing a shared
+                      passphrase when autosignMode is "psk".
+                    type: string
+                  storageClassName:
+                    description: StorageClassName is the optional StorageClass for
+                      the CA PVC.
+                    type: string
+                  storageSize:
+                    default: 2Gi
+                    description: StorageSize is the PVC size for the CA data directory
+                      (/etc/puppetlabs/puppetserver/ca).
+                    type: string
+                  ttl:
+                    default: 10y
+                    description: TTL is the root CA certificate validity duration.
+                    type: string
+                type: object
+              code:
+                description: Code configures how Puppet environments and modules are
+                  deployed (Git/g10k, PVC, or ImageVolume).
+                properties:
+                  claimName:
+                    description: ClaimName is the PVC name when mode is "pvc".
+                    type: string
+                  git:
+                    description: Git configures outbound-only central Git polling
+                      + synchronized g10k deployment.
+                    properties:
+                      authType:
+                        default: githubApp
+                        description: AuthType selects the Git authentication mechanism.
+                        enum:
+                        - githubApp
+                        - sshKey
+                        - httpsToken
+                        - none
+                        type: string
+                      credentialsSecretRef:
+                        description: CredentialsSecretRef references a Secret with
+                          ssh-privatekey (sshKey) or token/username/password (httpsToken).
+                        type: string
+                      generateTypes:
+                        default: true
+                        description: GenerateTypes runs puppet generate types per
+                          environment after g10k sync for environment isolation.
+                        type: boolean
+                      githubApp:
+                        description: GitHubApp configures native GitHub App authentication
+                          (RS256 JWT -> auto-rotated installation token).
+                        properties:
+                          apiBaseURL:
+                            default: https://api.github.com
+                            description: APIBaseURL is the GitHub API base URL (defaults
+                              to https://api.github.com; override for GitHub Enterprise
+                              Server).
+                            type: string
+                          appID:
+                            description: AppID is the GitHub App numeric ID.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          installationID:
+                            description: InstallationID is the GitHub App installation
+                              numeric ID.
+                            format: int64
+                            minimum: 1
+                            type: integer
+                          privateKeySecretRef:
+                            description: PrivateKeySecretRef references the Kubernetes
+                              Secret holding the GitHub App RSA private key PEM.
+                            properties:
+                              key:
+                                description: The key of the secret to select from.  Must
+                                  be a valid secret key.
+                                type: string
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret or its key
+                                  must be defined
+                                type: boolean
+                            required:
+                            - key
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        required:
+                        - appID
+                        - installationID
+                        - privateKeySecretRef
+                        type: object
+                      pollInterval:
+                        default: 60s
+                        description: PollInterval is how often the operator polls
+                          the remote repository via git ls-remote.
+                        type: string
+                      remote:
+                        description: Remote is the Git repository URL for the Puppet
+                          control-repo.
+                        type: string
+                      synchronizedRollout:
+                        default: true
+                        description: SynchronizedRollout ensures all compiler pods
+                          switch to new commits atomically.
+                        type: boolean
+                    required:
+                    - remote
+                    type: object
+                  image:
+                    description: Image is the container image reference when mode
+                      is "imageVolume".
+                    type: string
+                  mode:
+                    default: git
+                    description: Mode selects the code deployment strategy.
+                    enum:
+                    - git
+                    - pvc
+                    - imageVolume
+                    type: string
+                type: object
+              database:
+                description: Database configures OpenVox DB (PuppetDB) and PostgreSQL.
+                properties:
+                  enabled:
+                    default: true
+                    description: Enabled deploys OpenVox DB (PuppetDB) and connects
+                      compilers to it.
+                    type: boolean
+                  housekeeping:
+                    description: Housekeeping configures automatic PuppetDB node and
+                      report TTL cleanup.
+                    properties:
+                      gcInterval:
+                        default: 60
+                        description: GCInterval controls how often PuppetDB runs garbage
+                          collection in minutes.
+                        format: int32
+                        type: integer
+                      nodePurgeTTL:
+                        default: 14d
+                        description: NodePurgeTTL permanently purges deactivated nodes
+                          and their certs after this duration.
+                        type: string
+                      nodeTTL:
+                        default: 7d
+                        description: NodeTTL auto-deactivates nodes that have not
+                          checked in within this duration.
+                        type: string
+                      reportTTL:
+                        default: 14d
+                        description: ReportTTL purges old run reports after this duration.
+                        type: string
+                    type: object
+                  image:
+                    default: ghcr.io/slauger/openvox-db:latest
+                    description: Image is the OpenVox DB container image.
+                    type: string
+                  postgres:
+                    description: Postgres configures either an external PostgreSQL
+                      cluster (CNPG/RDS/Crunchy) or a built-in StatefulSet.
+                    properties:
+                      credentialsSecretRef:
+                        description: CredentialsSecretRef references a Secret with
+                          username and password keys.
+                        type: string
+                      databaseName:
+                        default: openvoxdb
+                        description: DatabaseName is the PostgreSQL database name.
+                        type: string
+                      host:
+                        description: Host is the external PostgreSQL hostname when
+                          mode is "external".
+                        type: string
+                      image:
+                        default: postgres:16-alpine
+                        description: Image is the PostgreSQL image when mode is "builtin".
+                        type: string
+                      mode:
+                        default: builtin
+                        description: Mode selects "external" (CNPG/RDS/Crunchy) or
+                          "builtin" (single-pod StatefulSet).
+                        enum:
+                        - external
+                        - builtin
+                        type: string
+                      port:
+                        default: 5432
+                        description: Port is the PostgreSQL port.
+                        format: int32
+                        type: integer
+                      sslMode:
+                        default: require
+                        description: SSLMode is the PostgreSQL SSL connection mode.
+                        type: string
+                      storageSize:
+                        default: 10Gi
+                        description: StorageSize is the PVC size when mode is "builtin".
+                        type: string
+                    type: object
+                  replicas:
+                    default: 1
+                    description: Replicas is the number of OpenVox DB pods.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+              hieraSecrets:
+                description: HieraSecrets configures the ESO & cert-manager to Hiera
+                  Secret Bridge.
+                properties:
+                  commonSecrets:
+                    description: CommonSecrets lists explicit Secret names whose keys
+                      are injected into common.yaml.
+                    items:
+                      type: string
+                    type: array
+                  enabled:
+                    default: true
+                    description: Enabled activates the Hiera Secret & Certificate
+                      Bridge.
+                    type: boolean
+                  labelSelector:
+                    additionalProperties:
+                      type: string
+                    description: LabelSelector matches Secrets in the namespace to
+                      inject into Hiera (defaults to voxkube.io/hiera-secret=true).
+                    type: object
+                type: object
+              networking:
+                description: Networking configures external Services, DNS SANs, and
+                  OpenShift Routes.
+                properties:
+                  additionalDNSNames:
+                    description: AdditionalDNSNames are extra DNS SANs included in
+                      the server TLS certificate.
+                    items:
+                      type: string
+                    type: array
+                  externalHostname:
+                    description: ExternalHostname is the primary DNS hostname Puppet
+                      agents use to connect (added to TLS SANs).
+                    type: string
+                  openShiftRoute:
+                    description: OpenShiftRoute configures an OpenShift Route (route.openshift.io/v1)
+                      with TLS passthrough.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Annotations are additional annotations added
+                          to the OpenShift Route.
+                        type: object
+                      enabled:
+                        default: false
+                        description: Enabled creates a route.openshift.io/v1 Route
+                          pointing to the Puppet server Service.
+                        type: boolean
+                      host:
+                        description: Host is the optional hostname for the OpenShift
+                          Route (defaults to spec.networking.externalHostname).
+                        type: string
+                    type: object
+                  serviceType:
+                    default: ClusterIP
+                    description: ServiceType is the Kubernetes Service type for the
+                      Puppet server pool.
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
+              server:
+                description: Server configures the OpenVox catalog compiler pool.
+                properties:
+                  autoscaling:
+                    description: Autoscaling configures HorizontalPodAutoscaler for
+                      the compiler pool.
+                    properties:
+                      enabled:
+                        default: false
+                        description: Enabled turns on HPA for the compiler Deployment.
+                        type: boolean
+                      maxReplicas:
+                        default: 6
+                        description: MaxReplicas is the maximum number of compiler
+                          replicas.
+                        format: int32
+                        type: integer
+                      minReplicas:
+                        default: 2
+                        description: MinReplicas is the minimum number of compiler
+                          replicas.
+                        format: int32
+                        type: integer
+                      targetCPUUtilizationPercentage:
+                        default: 75
+                        description: TargetCPUUtilizationPercentage is the CPU target
+                          for HPA.
+                        format: int32
+                        type: integer
+                    type: object
+                  image:
+                    default: ghcr.io/slauger/openvox-server:latest
+                    description: Image is the OpenVox Server container image.
+                    type: string
+                  imagePullPolicy:
+                    default: IfNotPresent
+                    description: ImagePullPolicy is the container image pull policy.
+                    enum:
+                    - Always
+                    - IfNotPresent
+                    - Never
+                    type: string
+                  javaArgs:
+                    default: -Xms1g -Xmx1g
+                    description: JavaArgs configures JVM heap settings for OpenVox
+                      Server.
+                    type: string
+                  maxActiveInstances:
+                    default: 2
+                    description: MaxActiveInstances is the JRuby pool size per compiler
+                      pod.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  replicas:
+                    default: 2
+                    description: Replicas is the number of catalog compiler pods.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                  resources:
+                    description: Resources specifies CPU and memory requests/limits
+                      for compiler pods.
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This field depends on the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  securityContext:
+                    description: |-
+                      SecurityContext allows optional override of the PodSecurityContext.
+                      By default RunAsUser, RunAsGroup, and FSGroup are nil for 100% OpenShift restricted-v2 SCC compliance.
+                    properties:
+                      fsGroup:
+                        description: FSGroup overrides the supplemental group applied
+                          to mounted volumes.
+                        format: int64
+                        type: integer
+                      fsGroupChangePolicy:
+                        description: FSGroupChangePolicy controls when volume ownership
+                          is changed to match FSGroup.
+                        enum:
+                        - Always
+                        - OnRootMismatch
+                        type: string
+                      runAsGroup:
+                        description: RunAsGroup overrides the primary GID the pod
+                          runs as.
+                        format: int64
+                        type: integer
+                      runAsNonRoot:
+                        description: RunAsNonRoot overrides whether the pod must run
+                          as a non-root user.
+                        type: boolean
+                      runAsUser:
+                        description: RunAsUser overrides the UID the pod runs as.
+                        format: int64
+                        type: integer
+                    type: object
+                type: object
+              workflows:
+                description: Workflows configures ENC, facts, report forwarding, and
+                  maintenance windows.
+                properties:
+                  facts:
+                    description: Facts configures custom and external trusted facts.
+                    properties:
+                      injectKubernetesMetadata:
+                        default: true
+                        description: InjectKubernetesMetadata injects cluster and
+                          environment metadata into node facts.
+                        type: boolean
+                    type: object
+                  maintenance:
+                    description: Maintenance configures global No-Op mode and scheduled
+                      maintenance freeze windows.
+                    properties:
+                      globalNoop:
+                        default: false
+                        description: GlobalNoop forces all catalog compilations into
+                          noop mode during change freezes.
+                        type: boolean
+                    type: object
+                  nodeClassification:
+                    description: NodeClassification configures the Kubernetes-native
+                      ENC and optional external ENC webhook.
+                    properties:
+                      autoCreateVoxNode:
+                        default: true
+                        description: AutoCreateVoxNode automatically creates a VoxNode
+                          CR when a new node checks in or submits a CSR.
+                        type: boolean
+                      defaultEnvironment:
+                        default: production
+                        description: DefaultEnvironment is the default Puppet environment
+                          when unspecified on a VoxNode.
+                        type: string
+                      externalURL:
+                        description: ExternalURL is the optional fallback ENC URL
+                          when mode is "externalHttp".
+                        type: string
+                      mode:
+                        default: voxnode
+                        description: Mode selects "voxnode" (classify from VoxNode
+                          CRs), "externalHttp", or "none".
+                        enum:
+                        - voxnode
+                        - externalHttp
+                        - none
+                        type: string
+                    type: object
+                  reports:
+                    description: Reports configures Puppet run report processors and
+                      optional external webhooks.
+                    properties:
+                      processors:
+                        description: Processors is the list of enabled Puppet report
+                          processors.
+                        items:
+                          type: string
+                        type: array
+                      webhookURL:
+                        description: WebhookURL is an optional HTTP endpoint to forward
+                          Puppet run reports.
+                        type: string
+                    type: object
+                type: object
+            type: object
+          status:
+            description: VoxClusterStatus defines the observed state of a VoxCluster.
+            properties:
+              caSecretName:
+                description: CASecretName is the name of the Secret containing the
+                  OpenVox CA certificate.
+                type: string
+              conditions:
+                description: Conditions represent the latest available observations
+                  of the VoxCluster state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              databaseURL:
+                description: DatabaseURL is the internal URL of OpenVox DB (PuppetDB).
+                type: string
+              hieraSecretName:
+                description: HieraSecretName is the name of the rendered Hiera Secret
+                  mounted into compilers.
+                type: string
+              observedCommit:
+                description: ObservedCommit is the latest Git commit SHA observed
+                  by the central Git poller.
+                type: string
+              phase:
+                description: Phase is the current high-level lifecycle phase of the
+                  cluster.
+                enum:
+                - Pending
+                - InitializingCA
+                - DeployingDatabase
+                - DeployingServer
+                - Running
+                - Degraded
+                - Error
+                type: string
+              readyReplicas:
+                description: ReadyReplicas is the number of ready compiler pods.
+                format: int32
+                type: integer
+              serverURL:
+                description: ServerURL is the external or cluster-internal URL where
+                  Puppet agents connect.
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

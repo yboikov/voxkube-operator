@@ -1,0 +1,81 @@
+name: CI & Container Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  lint-and-test:
+    name: Lint, Vet, Unit Tests & Helm Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Verify generated deepcopy and CRDs are up to date
+        run: |
+          make generate manifests
+          git diff --exit-code
+
+      - name: Run go fmt & go vet
+        run: |
+          make fmt vet
+          git diff --exit-code
+
+      - name: Run Go unit and controller tests
+        run: go test ./... -v -coverprofile=cover.out
+
+      - name: Lint Helm chart
+        run: |
+          helm lint charts/voxkube-operator
+          helm template voxkube charts/voxkube-operator --set cluster.enabled=true > /dev/null
+
+  build-image:
+    name: Build & Push Operator Image
+    needs: lint-and-test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/voxkube-operator
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+
+      - name: Build and push voxkube-operator image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: images/voxkube-operator/Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
