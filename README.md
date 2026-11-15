@@ -1,106 +1,89 @@
-# 🦊 VoxKube (`voxkube-operator`)
+# VoxKube (`voxkube-operator`)
 
 [![Built Entirely with AI](https://img.shields.io/badge/Built_Entirely_with-AI-8A2BE2?style=flat-square)](#ai-built-notice)
-[![API Group](https://img.shields.io/badge/API-voxkube.io%2Fv1alpha1-blue?style=flat-square)](#crds)
-[![OpenShift](https://img.shields.io/badge/OpenShift-restricted--v2_SCC_Ready-EE0000?style=flat-square)](#openshift-compatibility)
+[![API Group](https://img.shields.io/badge/API-voxkube.io%2Fv1alpha1-blue?style=flat-square)](#custom-resources)
+[![OpenShift](https://img.shields.io/badge/OpenShift-restricted--v2_SCC_Ready-EE0000?style=flat-square)](#why-voxkube)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green?style=flat-square)](LICENSE)
 
 > [!IMPORTANT]
-> **AI-Built Project Notice (`#ai-built-notice`)**: This entire project (**`VoxKube`** / `voxkube-operator` -- architecture, CRDs, Go controllers, ESO & `cert-manager` Hiera Bridge, GitHub App authentication, PuppetDB `EndpointSlice` discovery, Helm chart, unit tests, and documentation) was **designed, architected, and built entirely with AI**.
+> **AI-Built Project Notice (`#ai-built-notice`)**: This entire project (**`VoxKube`** / `voxkube-operator` -- architecture, CRDs, Go controllers, container images, ESO & `cert-manager` Hiera Bridge, GitHub App authentication, PuppetDB `EndpointSlice` discovery, Helm chart, unit tests, and documentation) was **designed, architected, and built entirely with AI**.
 
-**`VoxKube`** (`voxkube.io/v1alpha1`) is a next-generation, rock-solid **OpenShift- and Kubernetes-native Operator for OpenVox and Puppet**. It replaces complex multi-CRD setups with **three intuitive Custom Resource Definitions (`VoxCluster`, `VoxNode`, and `VoxDiscovery`)**.
+**VoxKube** is a Kubernetes and OpenShift operator that runs a complete [OpenVox](https://voxpupuli.org/openvox/) (open-source Puppet 8) infrastructure using three Custom Resources:
 
-<!-- features: keep in sync with docs/_snippets/features.md -->
-- 📦 **One-Manifest Stack (`VoxCluster`)** - Deploy OpenVox CA, horizontally scalable catalog compilers, OpenVox DB (PuppetDB), PostgreSQL (external CNPG/RDS or built-in StatefulSet), and OpenShift Routes from a single CRD (`oc get vc`)
-- 🔒 **100% OpenShift `restricted-v2` SCC Compliant** - Zero hardcoded `runAsUser` or `fsGroup` defaults; works out-of-the-box with OpenShift arbitrary namespace UID/GID ranges and native TLS passthrough `Route`s
-- 🔐 **Native ESO & `cert-manager` -> Hiera Bridge (`Sensitive`)** - Automatically injects External Secrets Operator (ESO) Secrets and multiple `cert-manager` SSL certificates per VM into Hiera (`common.yaml`, `roles/<role>.yaml`, `nodes/<certname>.yaml`) with `lookup_options` marking every secret key as `Sensitive`
-- 🖥️ **Declarative Node Lifecycle & Atomic Cleanup (`VoxNode`)** - Kubernetes-native ENC (`environment`, `role`, `classes`, `parameters`), `kubectl`-native CSR signing approval, and atomic CA certificate cleaning (`PUT /puppet-ca/v1/clean`) + PuppetDB node deactivation (`POST /pdb/cmd/v1` `deactivate node`)
-- 🗄️ **PuppetDB Housekeeping TTLs** - Built-in `node-ttl`, `node-purge-ttl`, `report-ttl`, and `gc-interval` configuration so stale VMs are automatically deactivated and purged
-- 🔍 **Native PuppetDB -> `EndpointSlice` & mTLS `ServiceMonitor` (`VoxDiscovery`)** - Exports active Puppet VMs matching fact/class/environment filters into Kubernetes `EndpointSlice`s and Prometheus `ServiceMonitor`s with zero-touch OpenVox CA mTLS scraping (`tls.mode: openvoxCA`)
-- 🔄 **Outbound-Only Git / `g10k` Sync + Native GitHub App Auth** - Central outbound `git ls-remote` poller (zero inbound webhooks needed from Git to cluster), RS256 JWT GitHub App installation token rotation, synchronized compiler rollout, and `puppet generate types` environment isolation
-<!-- /features -->
+- **`VoxCluster` (`kubectl get vc`)** -- Deploys and manages your OpenVox stack: a dedicated Certificate Authority (`<cluster>-ca`), horizontally scalable stateless catalog compilers (`<cluster>-server`), OpenVox DB / PuppetDB (`<cluster>-db`), and PostgreSQL (`<cluster>-postgres` or an external database).
+- **`VoxNode` (`kubectl get vn`)** -- Manages an individual client VM or server: approves its certificate request (CSR), defines its Puppet classes/role/parameters (ENC), provisions `cert-manager` SSL certificates or External Secrets for that machine, and cleans it up from both the CA and PuppetDB when deleted.
+- **`VoxDiscovery` (`kubectl get vd`)** -- Queries OpenVox DB for active machines matching your facts or classes and exports their IPs as native Kubernetes `EndpointSlice`s and Prometheus `ServiceMonitor`s.
 
 ---
 
-## Architecture
+## Why VoxKube? (`#why-voxkube`)
+
+Running Puppet / OpenVox inside Kubernetes or OpenShift traditionally hits four pain points. VoxKube solves all of them out of the box:
+
+1. **Separated CA (`StatefulSet`) vs. Stateless Compilers (`Deployment`)**:
+   - OpenVox CA state (`serial`, `inventory.txt`, `ca_crl.pem`, `signed/`, `requests/`) is file-based and not safe for concurrent multi-pod writes.
+   - VoxKube runs a dedicated 1-replica **`<cluster>-ca` `StatefulSet`** backed by a standard `ReadWriteOnce` PersistentVolumeClaim (`<cluster>-ca-data`), while **`<cluster>-server`** runs as a stateless `Deployment` (`2..N` replicas) with CA disabled so you can scale catalog compilation horizontally without `ReadWriteMany` storage.
+2. **Disaster-Recovery (DR) Safe CA Storage**:
+   - The CA bootstrap container checks whether `ca_crt.pem` already exists on the `<cluster>-ca-data` PVC before seeding.
+   - If a pod restarts or you restore a cluster from storage backup, VoxKube reuses the existing CA certificate, private key, CRL, and signed client inventory on the PVC. Your existing VMs continue checking in without re-enrolling.
+3. **100% OpenShift `restricted-v2` SCC Compliant**:
+   - All workloads (`voxkube-operator`, `openvox-server`, `openvox-db`, `postgresql`) run rootless without hardcoded UIDs/GIDs, allowing OpenShift to assign arbitrary namespace UIDs cleanly.
+4. **First-Party Multi-Arch Container Images (`linux/amd64` & `linux/arm64`)**:
+   - Built directly from official Vox Pupuli OpenVox 8 packages (`yum.voxpupuli.org`) on Red Hat UBI 9 via GitHub Actions:
+     - `ghcr.io/yboikov/voxkube-operator:latest`
+     - `ghcr.io/yboikov/openvox-server:latest`
+     - `ghcr.io/yboikov/openvox-db:latest`
+
+---
+
+## How It Works
 
 ```mermaid
 graph TD
-    subgraph "Declarative Inputs (voxkube.io/v1alpha1)"
-        VC["📦 VoxCluster CR (oc get vc)"]
-        VN["🖥️ VoxNode CR (oc get vn)"]
-        VD["🔍 VoxDiscovery CR (oc get vd)"]
-        ESO["🔐 ESO ExternalSecret"]
-        CM["📜 cert-manager Certificate"]
+    subgraph "Your YAML Manifests (voxkube.io/v1alpha1)"
+        VC["VoxCluster (kubectl get vc)"]
+        VN["VoxNode (kubectl get vn)"]
+        VD["VoxDiscovery (kubectl get vd)"]
     end
 
-    subgraph "VoxKube Operator"
-        ClusterCtrl["VoxCluster Reconciler<br/>+ GitHub App Token Rotator<br/>+ Outbound Git ls-remote Poller"]
-        NodeCtrl["VoxNode Reconciler<br/>(ENC, CSR Sign, CA+DB Clean)"]
-        DiscCtrl["VoxDiscovery Reconciler<br/>(EndpointSlice + mTLS Sync)"]
-        HieraBridge["Hiera Secret & Cert Bridge<br/>(Auto Sensitive lookup_options)"]
+    subgraph "OpenVox Stack in Kubernetes / OpenShift"
+        CA["<cluster>-ca-0 (StatefulSet :8140)<br/>+ <cluster>-ca-data PVC (RWO)"]
+        SRV["<cluster>-server (Deployment :8140)<br/>2..N Stateless Catalog Compilers<br/>+ ENC & Hiera Secrets"]
+        DB["<cluster>-db (OpenVox DB :8080/:8081)<br/>+ <cluster>-postgres"]
+        EPS["Kubernetes EndpointSlices<br/>+ Prometheus ServiceMonitor"]
     end
 
-    VC --> ClusterCtrl
-    VN --> NodeCtrl
-    VD --> DiscCtrl
-    VN -->|auto-creates| CM
-    ESO -->|produces Secret| HieraBridge
-    CM -->|produces TLS Secret| HieraBridge
-
-    subgraph "OpenVox Runtime (OpenShift restricted-v2 Ready)"
-        CA["🔐 OpenVox CA PKI"]
-        Comp["⚡ Compiler Pods<br/>+ Synchronized g10k Sidecar"]
-        PDB["🗄️ OpenVox DB (PuppetDB)<br/>(node-ttl & node-purge-ttl)"]
-        HieraSec["🔒 Mounted Hiera Secret<br/>(/etc/puppetlabs/puppet/hiera-secrets)"]
-        EPS["📡 Headless Service + EndpointSlices<br/>+ mTLS ServiceMonitor"]
+    subgraph "Managed Client VMs / Pods"
+        VM["OpenVox Agent (puppet agent -t)"]
     end
 
-    ClusterCtrl --> CA
-    ClusterCtrl --> Comp
-    ClusterCtrl --> PDB
-    HieraBridge --> HieraSec
-    HieraSec --> Comp
-    NodeCtrl -->|Sign CSR / Clean Cert| CA
-    NodeCtrl -->|Deactivate Node| PDB
-    DiscCtrl -->|Query Inventory| PDB
-    DiscCtrl -->|Export IPs & mTLS| EPS
+    VC -->|reconciles| CA
+    VC -->|reconciles| SRV
+    VC -->|reconciles| DB
+    VN -->|signs CSR / cleans cert| CA
+    VN -->|injects ENC & Hiera data| SRV
+    VD -->|queries inventory| DB
+    VD -->|exports IPs| EPS
+    VM -->|1. ca_server :8140 (CSR & Cert)| CA
+    VM -->|2. server :8140 (Catalog)| SRV
 ```
 
 ---
 
-## Installation via Helm (`charts/voxkube-operator`)
+## 5-Minute Quickstart
 
-### 1. Install the Operator Only
-
-```bash
-helm upgrade --install voxkube-operator charts/voxkube-operator \
-  --namespace openvox \
-  --create-namespace
-```
-
-### 2. Single-Command Operator + `VoxCluster` Stack Install
-
-You can install the operator **and** deploy a production `VoxCluster` in one command by setting `cluster.enabled=true`:
+### Step 1: Install the Operator via Helm
 
 ```bash
-helm upgrade --install voxkube-operator charts/voxkube-operator \
+helm upgrade --install voxkube-operator ./charts/voxkube-operator \
   --namespace openvox \
   --create-namespace \
-  --set cluster.enabled=true \
-  --set cluster.name=production \
-  --set cluster.code.git.remote=https://github.com/myorg/puppet-control-repo.git \
-  --set cluster.networking.externalHostname=puppet.apps.ocp.example.com \
-  --set cluster.networking.openShiftRoute.enabled=true
+  --set image.tag=latest
 ```
 
----
+### Step 2: Create a `VoxCluster`
 
-## Custom Resource Definitions (`#crds`)
-
-### 1. `VoxCluster` (`oc get vc`)
-
-Deploys the entire OpenVox stack (CA, Compilers with outbound `g10k` + GitHub App auth, OpenVox DB with TTL housekeeping, Hiera Secret Bridge, Services, and OpenShift `Route`):
+Apply a `VoxCluster` manifest to bring up the CA, Compiler Pool, OpenVox DB, and PostgreSQL:
 
 ```yaml
 apiVersion: voxkube.io/v1alpha1
@@ -110,10 +93,92 @@ metadata:
   namespace: openvox
 spec:
   code:
+    mode: pvc # Use "git" to sync a Puppet control-repo with g10k
+  ca:
+    storageSize: 2Gi
+  server:
+    image: ghcr.io/yboikov/openvox-server:latest
+    replicas: 2
+    javaArgs: "-Xms512m -Xmx512m"
+  database:
+    enabled: true
+    image: ghcr.io/yboikov/openvox-db:latest
+    postgres:
+      mode: builtin
+      storageSize: 10Gi
+  networking:
+    externalHostname: puppet.example.com
+    serviceType: ClusterIP
+```
+
+Check the deployed pods and services:
+
+```bash
+kubectl get vc,pods,pvc,svc -n openvox
+```
+
+You will see:
+- `production-ca-0` (`StatefulSet`) and `service/production-ca` (`:8140`) for CA operations.
+- `production-server-*` (`Deployment`) and `service/production` (`:8140`) for catalog compilation.
+- `production-db-*` and `production-postgres-0` for OpenVox DB.
+
+---
+
+### Step 3: Enroll & Classify a Client Node (`VoxNode`)
+
+1. Point your client's `/etc/puppetlabs/puppet/puppet.conf` to the CA service and Server service:
+   ```ini
+   [main]
+   certname = web-01.example.com
+   ca_server = production-ca.openvox.svc.cluster.local
+   server = production.openvox.svc.cluster.local
+   environment = production
+   ```
+2. Submit a certificate request from the client:
+   ```bash
+   /opt/puppetlabs/bin/puppet ssl submit_request
+   ```
+3. Create a `VoxNode` resource in Kubernetes to sign the certificate and classify the machine:
+   ```yaml
+   apiVersion: voxkube.io/v1alpha1
+   kind: VoxNode
+   metadata:
+     name: web-01
+     namespace: openvox
+   spec:
+     clusterRef: production
+     certname: web-01.example.com
+     state: Active
+     classification:
+       environment: production
+       role: role::webserver
+       classes:
+         - profile::nginx
+       parameters:
+         http_port: "8080"
+         welcome_message: "Managed by VoxKube"
+   ```
+4. Run `puppet agent -t` on the client:
+   ```bash
+   /opt/puppetlabs/bin/puppet agent -t
+   ```
+   The agent downloads its signed certificate from `production-ca`, requests its catalog from `production`, and applies the classes and parameters defined in `VoxNode/web-01`.
+
+---
+
+## Custom Resources Guide (`#custom-resources`)
+
+### 1. Deploying Puppet Code from Git (`VoxCluster`)
+
+In production, set `spec.code.mode: git` to synchronize your Puppet `control-repo` automatically using `g10k`. VoxKube polls the remote Git repository outbound (`git ls-remote`) so you do not need inbound webhooks through your firewall:
+
+```yaml
+spec:
+  code:
     mode: git
     git:
       remote: https://github.com/myorg/puppet-control-repo.git
-      authType: githubApp
+      authType: githubApp # or "none" / "token"
       githubApp:
         appID: 123456
         installationID: 98765432
@@ -123,89 +188,57 @@ spec:
       pollInterval: 60s
       synchronizedRollout: true
       generateTypes: true
-  server:
-    replicas: 2
-    javaArgs: "-Xms1g -Xmx1g"
-  database:
-    enabled: true
-    postgres:
-      mode: builtin
-      storageSize: 10Gi
-    housekeeping:
-      nodeTTL: 7d
-      nodePurgeTTL: 14d
-      reportTTL: 14d
-      gcInterval: 60
-  networking:
-    externalHostname: puppet.apps.ocp.example.com
-    openShiftRoute:
-      enabled: true
-  hieraSecrets:
-    enabled: true
-    commonSecrets:
-      - global-puppet-secrets
 ```
 
-Trigger an immediate outbound Git code sync at any time without webhooks:
+To trigger an immediate Git sync without waiting for `pollInterval`:
 
 ```bash
-oc annotate voxcluster production -n openvox voxkube.io/sync-now="$(date +%s)" --overwrite
+kubectl annotate voxcluster production -n openvox voxkube.io/sync-now="$(date +%s)" --overwrite
 ```
 
 ---
 
-### 2. `VoxNode` (`oc get vn`)
+### 2. Injecting Secrets & SSL Certificates into Hiera (`VoxNode` + ESO + `cert-manager`)
 
-Manages per-VM CSR signing, Kubernetes-native ENC (`environment`, `role`, `classes`, `parameters`), multiple `cert-manager` SSL certificates per VM, per-node ESO secrets, and atomic CA + PuppetDB cleanup:
+VoxKube includes a built-in Hiera Secret Bridge that mounts Kubernetes Secrets into `/etc/puppetlabs/puppet/hiera-secrets` and automatically adds `lookup_options` with `convert_to: "Sensitive"` so secrets never leak in Puppet logs or reports:
 
-```yaml
-apiVersion: voxkube.io/v1alpha1
-kind: VoxNode
-metadata:
-  name: web01-example-com
-  namespace: openvox
-spec:
-  clusterRef: production
-  certname: web01.example.com
-  state: Active # PendingApproval | Active | Revoked | Decommissioned
-  classification:
-    environment: production
-    role: webserver
-    classes:
-      - profile::base
-      - profile::nginx
-  certificates:
-    - name: public_web
-      issuerRef:
-        name: letsencrypt-prod
-        kind: ClusterIssuer
-      dnsNames:
-        - app.example.com
-      targetCertPath: /etc/nginx/ssl/app.example.com.crt
-      targetKeyPath: /etc/nginx/ssl/app.example.com.key
-    - name: internal_api
-      issuerRef:
-        name: corp-vault-issuer
-        kind: ClusterIssuer
-      dnsNames:
-        - web01.internal.example.com
-      targetCertPath: /etc/nginx/ssl/internal-api.crt
-      targetKeyPath: /etc/nginx/ssl/internal-api.key
-```
-
-To atomically revoke & clean a VM's certificate on the OpenVox CA **and** deactivate it in OpenVox DB (PuppetDB):
-
-```bash
-oc patch voxnode web01-example-com -n openvox --type=merge -p '{"spec":{"state":"Decommissioned"}}'
-# or simply:
-oc delete voxnode web01-example-com -n openvox
-```
+- **Common Secrets**: List secret names under `spec.hieraSecrets.commonSecrets` on `VoxCluster`, or label any Secret (for example from External Secrets Operator) with `voxkube.io/hiera-secret: "true"`.
+- **Role Secrets**: Label a Secret with `voxkube.io/hiera-secret: "true"`, `voxkube.io/hiera-scope: "role"`, and `voxkube.io/hiera-role: "webserver"`.
+- **Per-Node SSL Certificates via `cert-manager`**: Request one or more certificates directly on a `VoxNode`:
+  ```yaml
+  spec:
+    certificates:
+      - name: public_web
+        issuerRef:
+          name: letsencrypt-prod
+          kind: ClusterIssuer
+        dnsNames:
+          - app.example.com
+        targetCertPath: /etc/nginx/ssl/app.example.com.crt
+        targetKeyPath: /etc/nginx/ssl/app.example.com.key
+  ```
+  VoxKube creates the `cert-manager` `Certificate`, waits for the TLS Secret, and injects `certs::public_web::tls_crt`, `certs::public_web::tls_key`, and `openvox::certs` into that node's Hiera data.
 
 ---
 
-### 3. `VoxDiscovery` (`oc get vd`)
+### 3. Decommissioning a Node (`VoxNode`)
 
-Queries OpenVox DB (PuppetDB) for active VMs matching fact/class/environment filters and exports them into native Kubernetes `EndpointSlice`s and an mTLS-configured Prometheus `ServiceMonitor`:
+When a VM is retired, either set `spec.state: Decommissioned` or delete the `VoxNode`:
+
+```bash
+kubectl delete voxnode web-01 -n openvox
+```
+
+VoxKube's finalizer atomically:
+1. Revokes and cleans the node's certificate on `<cluster>-ca` (`PUT /puppet-ca/v1/clean`).
+2. Deactivates the node in OpenVox DB (`POST /pdb/cmd/v1` `deactivate node`).
+3. Removes its ENC and Hiera entries from `<cluster>-server`.
+
+---
+
+### 4. Exporting PuppetDB Inventory to Prometheus (`VoxDiscovery`)
+
+Use `VoxDiscovery` to turn OpenVox DB into a Kubernetes service discovery source for Prometheus:
 
 ```yaml
 apiVersion: voxkube.io/v1alpha1
@@ -221,8 +254,6 @@ spec:
     environment: production
     facts:
       kernel: Linux
-    classes:
-      - profile::node_exporter
   ports:
     - name: metrics
       port: 9100
@@ -233,21 +264,20 @@ spec:
     preserveNodeHostnameAsInstance: true
     tls:
       enabled: true
-      mode: openvoxCA # Zero-touch mTLS using Puppet's existing PKI!
+      mode: openvoxCA
 ```
 
 ---
 
-## Development & Testing
+## Development & Local Testing
 
 ```bash
-# Generate deepcopy methods and CRD manifests
-make generate manifests
-
-# Run Go unit and controller tests
+# Run unit and controller tests
 go test ./... -v
 
-# Lint and template-test the Helm chart
+# Lint the Helm chart
 helm lint charts/voxkube-operator
-helm template voxkube charts/voxkube-operator --set cluster.enabled=true
+
+# Regenerate CRD manifests and deepcopy code after API changes
+make generate manifests
 ```
