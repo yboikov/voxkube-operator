@@ -1,11 +1,13 @@
 # Stage 1: Build g10k binary for Git environment synchronization
-FROM docker.io/library/golang:latest AS g10k-builder
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:latest AS g10k-builder
 ARG TARGETARCH
 ENV GOTOOLCHAIN=auto
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/voxpupuli/g10k/cmd/g10k@latest
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/voxpupuli/g10k/cmd/g10k@latest && \
+    mkdir -p /out && \
+    (cp /go/bin/g10k /out/g10k 2>/dev/null || cp /go/bin/linux_${TARGETARCH}/g10k /out/g10k)
 
 # Stage 2: Install OpenVox Server from official Vox Pupuli RPM repository
-FROM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
+FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
     dnf install -y --setopt=install_weak_deps=False openvox-server && \
     dnf clean all
@@ -40,7 +42,7 @@ ENV LOGDIR=/var/log/puppetlabs/puppetserver \
     HOME=/opt/puppetlabs/server/data/puppetserver \
     PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/puppetlabs/server/bin:/opt/puppetlabs/puppet/bin:/opt/puppetlabs/bin
 
-COPY --from=g10k-builder /go/bin/g10k /usr/local/bin/g10k
+COPY --from=g10k-builder /out/g10k /usr/local/bin/g10k
 COPY --from=rpm-installer /opt/puppetlabs /opt/puppetlabs
 COPY --from=rpm-installer /etc/puppetlabs /etc/puppetlabs
 COPY --from=rpm-installer /var/log/puppetlabs /var/log/puppetlabs

@@ -1,5 +1,5 @@
 # Stage 1: Install OpenVox DB from official Vox Pupuli RPM repository
-FROM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
+FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
     dnf install -y --setopt=install_weak_deps=False openvoxdb && \
     dnf clean all
