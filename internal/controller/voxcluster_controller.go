@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -129,7 +130,15 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		Message:            "VoxCluster CA, Database, Hiera Bridge, and Compilers reconciled",
 	})
 
-	if err := r.Status().Update(ctx, cluster); err != nil {
+	desiredStatus := cluster.Status
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &openvoxv1alpha1.VoxCluster{}
+		if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
+			return err
+		}
+		latest.Status = desiredStatus
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 

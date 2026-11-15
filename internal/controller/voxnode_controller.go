@@ -16,6 +16,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -121,7 +122,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Reason:             "NodeDecommissioned",
 			Message:            "Node certificate cleaned from CA and node deactivated in PuppetDB",
 		})
-		if err := r.Status().Update(ctx, node); err != nil {
+		if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
 			return ctrl.Result{}, err
 		}
 		// Refresh cluster Hiera & ENC
@@ -131,8 +132,8 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Handle State: Revoked (revoke cert on CA without deactivating history)
 	if node.Spec.State == openvoxv1alpha1.NodeStateRevoked {
-		if r.CAClient != nil {
-			if err := r.CAClient.RevokeCert(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
+		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
+			if err := caClient.RevokeCert(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
@@ -145,7 +146,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Reason:             "CertificateRevoked",
 			Message:            "Node certificate revoked on OpenVox CA",
 		})
-		if err := r.Status().Update(ctx, node); err != nil {
+		if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -161,21 +162,23 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			Reason:             "PendingApproval",
 			Message:            "Awaiting administrator approval (set spec.state: Active to sign CSR)",
 		})
-		if err := r.Status().Update(ctx, node); err != nil {
+		if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
 
 	// Default State: Active
-	// 1. Sign CSR on OpenVox CA
+	// 1. Sign CSR on OpenVox CA (if not already signed)
 	fingerprint := node.Status.CertificateFingerprint
-	if r.CAClient != nil {
-		fp, err := r.CAClient.SignCSR(ctx, cluster.Status.ServerURL, node.Spec.Certname)
-		if err != nil {
-			logger.Info("OpenVox CA not yet reachable for CSR signing; continuing ENC and Hiera sync", "certname", node.Spec.Certname, "reason", err.Error())
-		} else {
-			fingerprint = fp
+	if !node.Status.CertificateSigned {
+		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
+			fp, err := caClient.SignCSR(ctx, cluster.Status.ServerURL, node.Spec.Certname)
+			if err != nil {
+				logger.Info("OpenVox CA CSR not pending or CA not reachable; continuing ENC and Hiera sync", "certname", node.Spec.Certname, "reason", err.Error())
+			} else {
+				fingerprint = fp
+			}
 		}
 	}
 	if fingerprint == "" {
@@ -210,24 +213,75 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		Message:            "Node CSR signed, ENC classified, and certificates synced to Hiera",
 	})
 
-	if err := r.Status().Update(ctx, node); err != nil {
+	if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
 }
 
+func (r *VoxNodeReconciler) updateVoxNodeStatus(ctx context.Context, key types.NamespacedName, desired openvoxv1alpha1.VoxNodeStatus) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &openvoxv1alpha1.VoxNode{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return err
+		}
+		latest.Status = desired
+		return r.Status().Update(ctx, latest)
+	})
+}
+
+func (r *VoxNodeReconciler) caClientForCluster(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) OpenVoxCAClient {
+	if r.CAClient == nil {
+		return nil
+	}
+	if _, isHTTP := r.CAClient.(*HTTPCAClient); !isHTTP {
+		return r.CAClient
+	}
+	caSecName := cluster.Status.CASecretName
+	if caSecName == "" {
+		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
+	}
+	caSec := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecName}, caSec); err == nil {
+		if httpClient, err := NewMTLSHTTPClient(caSec.Data["ca.crt"], caSec.Data["tls.crt"], caSec.Data["tls.key"]); err == nil {
+			return NewHTTPCAClient(httpClient)
+		}
+	}
+	return r.CAClient
+}
+
+func (r *VoxNodeReconciler) dbClientForCluster(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) OpenVoxDBClient {
+	if r.DBClient == nil {
+		return nil
+	}
+	if _, isHTTP := r.DBClient.(*HTTPPuppetDBClient); !isHTTP {
+		return r.DBClient
+	}
+	caSecName := cluster.Status.CASecretName
+	if caSecName == "" {
+		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
+	}
+	caSec := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecName}, caSec); err == nil {
+		if httpClient, err := NewMTLSHTTPClient(caSec.Data["ca.crt"], caSec.Data["tls.crt"], caSec.Data["tls.key"]); err == nil {
+			return NewHTTPPuppetDBClient(httpClient)
+		}
+	}
+	return r.DBClient
+}
+
 func (r *VoxNodeReconciler) decommissionNode(ctx context.Context, node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) error {
 	logger := log.FromContext(ctx)
 	// 1. Revoke and clean node certificate from OpenVox CA (PUT /puppet-ca/v1/clean)
-	if r.CAClient != nil {
-		if err := r.CAClient.CleanNode(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
+	if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
+		if err := caClient.CleanNode(ctx, cluster.Status.ServerURL, node.Spec.Certname); err != nil {
 			logger.Info("OpenVox CA not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}
 	// 2. Deactivate node in OpenVox DB / PuppetDB (POST /pdb/cmd/v1 -> deactivate node)
-	if r.DBClient != nil {
-		if err := r.DBClient.DeactivateNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname); err != nil {
+	if dbClient := r.dbClientForCluster(ctx, cluster); dbClient != nil {
+		if err := dbClient.DeactivateNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname); err != nil {
 			logger.Info("OpenVox DB not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}

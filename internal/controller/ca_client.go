@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -38,6 +39,29 @@ func NewHTTPCAClient(httpClient *http.Client) *HTTPCAClient {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &HTTPCAClient{HTTPClient: httpClient}
+}
+
+// NewMTLSHTTPClient builds an *http.Client that trusts the provided OpenVox CA PEM and presents the client TLS certificate/key.
+func NewMTLSHTTPClient(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*http.Client, error) {
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caCertPEM) {
+		return nil, fmt.Errorf("failed to parse CA certificate PEM")
+	}
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		RootCAs:    pool,
+	}
+	if len(clientCertPEM) > 0 && len(clientKeyPEM) > 0 {
+		cert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+		if err != nil {
+			return nil, err
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	return &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+	}, nil
 }
 
 type caStatusUpdate struct {

@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -87,12 +88,12 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 2. Query OpenVox DB (PuppetDB) for active nodes matching selector
 	var activeNodes []DiscoveredPuppetNode
-	if r.DBClient != nil {
+	if dbClient := r.dbClientForCluster(ctx, cluster); dbClient != nil {
 		dbURL := cluster.Status.DatabaseURL
 		if dbURL == "" {
 			dbURL = fmt.Sprintf("https://%s-db.%s.svc.cluster.local:8081", cluster.Name, cluster.Namespace)
 		}
-		nodes, err := r.DBClient.QueryActiveNodes(ctx, dbURL, disc.Spec.Selector)
+		nodes, err := dbClient.QueryActiveNodes(ctx, dbURL, disc.Spec.Selector)
 		if err != nil {
 			logger.Info("PuppetDB inventory not yet reachable; reconciling empty EndpointSlice and requeuing", "dbURL", dbURL, "reason", err.Error())
 		} else {
@@ -144,7 +145,15 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            fmt.Sprintf("Exported %d active nodes across %d EndpointSlice(s)", discoveredCount, sliceCount),
 	})
 
-	if err := r.Status().Update(ctx, disc); err != nil {
+	desiredStatus := disc.Status
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &openvoxv1alpha1.VoxDiscovery{}
+		if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
+			return err
+		}
+		latest.Status = desiredStatus
+		return r.Status().Update(ctx, latest)
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -155,6 +164,26 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 	return ctrl.Result{RequeueAfter: syncInterval}, nil
+}
+
+func (r *VoxDiscoveryReconciler) dbClientForCluster(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) OpenVoxDBClient {
+	if r.DBClient == nil {
+		return nil
+	}
+	if _, isHTTP := r.DBClient.(*HTTPPuppetDBClient); !isHTTP {
+		return r.DBClient
+	}
+	caSecName := cluster.Status.CASecretName
+	if caSecName == "" {
+		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
+	}
+	caSec := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecName}, caSec); err == nil {
+		if httpClient, err := NewMTLSHTTPClient(caSec.Data["ca.crt"], caSec.Data["tls.crt"], caSec.Data["tls.key"]); err == nil {
+			return NewHTTPPuppetDBClient(httpClient)
+		}
+	}
+	return r.DBClient
 }
 
 func (r *VoxDiscoveryReconciler) reconcileHeadlessService(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) (string, error) {
