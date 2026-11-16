@@ -149,9 +149,9 @@ spec:
                       type: string
                     type: array
                   environment:
-                    default: production
-                    description: Environment is the Puppet environment assigned to
-                      this node (e.g., "production", "staging").
+                    description: |-
+                      Environment is the Puppet environment assigned to this node (e.g., "production", "staging").
+                      When empty, the VoxCluster's spec.workflows.nodeClassification.defaultEnvironment is used ("production" by default).
                     type: string
                   parameters:
                     additionalProperties:
