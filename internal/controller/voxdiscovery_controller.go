@@ -23,7 +23,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	openvoxv1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
 )
@@ -77,6 +79,26 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	// Without OpenVox DB there is nothing to discover: remove what this VoxDiscovery created and wait until the
+	// VoxCluster enables its database (the VoxCluster watch re-triggers this reconcile).
+	if !databaseEnabled(cluster) {
+		if err := r.removeDiscoveryResources(ctx, disc); err != nil {
+			return ctrl.Result{}, err
+		}
+		disc.Status.DiscoveredNodes = 0
+		disc.Status.EndpointSliceCount = 0
+		disc.Status.ServiceName = ""
+		disc.Status.ScraperSecretName = ""
+		meta.SetStatusCondition(&disc.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: disc.Generation,
+			Reason:             "DatabaseDisabled",
+			Message:            fmt.Sprintf("VoxCluster %q has spec.database.enabled=false; nothing to discover", cluster.Name),
+		})
+		return ctrl.Result{}, r.Status().Update(ctx, disc)
 	}
 
 	// 1. Reconcile headless Service (ClusterIP: None)
@@ -585,6 +607,48 @@ func voxDiscoveryLabels(name string) map[string]string {
 	}
 }
 
+// removeDiscoveryResources deletes the headless Service, EndpointSlices and ServiceMonitor owned by disc.
+// The scraper TLS Secret is kept so that re-enabling discovery reuses the certificate.
+func (r *VoxDiscoveryReconciler) removeDiscoveryResources(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) error {
+	slices := &discoveryv1.EndpointSliceList{}
+	if err := r.List(ctx, slices, client.InNamespace(disc.Namespace), client.MatchingLabels{
+		discoveryv1.LabelServiceName: disc.Name,
+	}); err != nil {
+		return err
+	}
+	for i := range slices.Items {
+		if metav1.IsControlledBy(&slices.Items[i], disc) {
+			if err := r.Delete(ctx, &slices.Items[i]); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+		}
+	}
+
+	svc := &corev1.Service{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, svc); err == nil {
+		if metav1.IsControlledBy(svc, disc) {
+			if err := r.Delete(ctx, svc); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+
+	sm := &unstructured.Unstructured{}
+	sm.SetGroupVersionKind(schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor"})
+	if err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, sm); err == nil {
+		if metav1.IsControlledBy(sm, disc) {
+			if err := r.Delete(ctx, sm); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+		}
+	} else if !apierrors.IsNotFound(err) && !isNoMatch(err, "ServiceMonitor") {
+		return err
+	}
+	return nil
+}
+
 // SetupWithManager registers VoxDiscoveryReconciler with the controller manager.
 func (r *VoxDiscoveryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
@@ -592,5 +656,22 @@ func (r *VoxDiscoveryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&discoveryv1.EndpointSlice{}).
 		Owns(&corev1.Secret{}).
+		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForCluster)).
 		Complete(r)
+}
+
+// discoveriesForCluster enqueues every VoxDiscovery that references the changed VoxCluster
+// (e.g. when its database is enabled or disabled).
+func (r *VoxDiscoveryReconciler) discoveriesForCluster(ctx context.Context, obj client.Object) []reconcile.Request {
+	list := &openvoxv1alpha1.VoxDiscoveryList{}
+	if err := r.List(ctx, list, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, d := range list.Items {
+		if d.Spec.ClusterRef == obj.GetName() {
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: d.Namespace, Name: d.Name}})
+		}
+	}
+	return reqs
 }

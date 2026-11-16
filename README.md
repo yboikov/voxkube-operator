@@ -675,6 +675,8 @@ inventory[certname, environment, facts] {
 }
 ```
 
+`VoxDiscovery` is optional: nothing creates one for you, so dev/test clusters without one get no discovery Service or EndpointSlices. If the referenced `VoxCluster` has `spec.database.enabled: false`, the `VoxDiscovery` deletes the headless Service, EndpointSlices and ServiceMonitor it created, never queries OpenVox DB, and reports `Ready=False` with reason `DatabaseDisabled`. It starts working again as soon as the database is enabled.
+
 Fact filters are then applied client-side. Nodes whose `VoxNode` is `Revoked` or `Decommissioned` are dropped. **If the query fails, the existing slices are left untouched** (so Prometheus keeps its targets), and `Ready=False` with reason `QueryFailed` is reported.
 
 #### `VoxDiscovery.spec.selector`
@@ -728,7 +730,7 @@ All of these are owned by the `VoxDiscovery` and labelled `app.kubernetes.io/nam
 | `serviceName` | string | `<vd>` |
 | `scraperSecretName` | string | TLS Secret used by the ServiceMonitor, if any. |
 | `lastSyncTime` | timestamp | Last successful sync. |
-| `conditions` | []`Condition` | `Ready` (`Synced`, `QueryFailed`, `ClusterNotFound`). |
+| `conditions` | []`Condition` | `Ready` (`Synced`, `QueryFailed`, `ClusterNotFound`, `DatabaseDisabled`). |
 
 ---
 

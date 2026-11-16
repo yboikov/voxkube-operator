@@ -13,6 +13,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -395,5 +397,76 @@ func TestVoxCluster_GitSidecarModeAndPSKRequiresSecret(t *testing.T) {
 	_ = k8sClient.Get(ctx, types.NamespacedName{Namespace: "ovx", Name: "prod"}, latest)
 	if latest.Status.Phase != openvoxv1alpha1.ClusterPhaseError {
 		t.Errorf("expected Phase=Error, got %s", latest.Status.Phase)
+	}
+}
+
+type countingDB struct{ queries int }
+
+func (c *countingDB) DeactivateNode(context.Context, string, string) error { return nil }
+func (c *countingDB) QueryActiveNodes(context.Context, string, openvoxv1alpha1.DiscoverySelectorSpec) ([]DiscoveredPuppetNode, error) {
+	c.queries++
+	return nil, nil
+}
+func (c *countingDB) GetNode(context.Context, string, string) (*PuppetDBNode, error) {
+	return nil, ErrNodeNotFound
+}
+
+func TestVoxDiscovery_DatabaseDisabledRemovesSlices(t *testing.T) {
+	s := newVoxKubeScheme(t)
+	ctx := context.Background()
+
+	disabled := false
+	cluster := &openvoxv1alpha1.VoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "dev", Namespace: "ovx"},
+		Spec:       openvoxv1alpha1.VoxClusterSpec{Database: openvoxv1alpha1.ClusterDatabaseSpec{Enabled: &disabled}},
+	}
+	disc := &openvoxv1alpha1.VoxDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-exporter", Namespace: "ovx", UID: "disc-uid"},
+		Spec: openvoxv1alpha1.VoxDiscoverySpec{
+			ClusterRef: "dev",
+			Ports:      []openvoxv1alpha1.DiscoveryPort{{Name: "metrics", Port: 9100}},
+		},
+	}
+	owner := []metav1.OwnerReference{{
+		APIVersion: openvoxv1alpha1.GroupVersion.String(), Kind: "VoxDiscovery", Name: disc.Name, UID: disc.UID,
+		Controller: new(true),
+	}}
+	staleSvc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "node-exporter", Namespace: "ovx", OwnerReferences: owner}}
+	staleSlice := &discoveryv1.EndpointSlice{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "node-exporter-0", Namespace: "ovx", OwnerReferences: owner,
+			Labels: map[string]string{discoveryv1.LabelServiceName: "node-exporter"},
+		},
+		AddressType: discoveryv1.AddressTypeIPv4,
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(cluster, disc, staleSvc, staleSlice).
+		WithStatusSubresource(&openvoxv1alpha1.VoxDiscovery{}).
+		Build()
+	db := &countingDB{}
+	r := &VoxDiscoveryReconciler{Client: k8sClient, Scheme: s, DBClient: db}
+
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "ovx", Name: "node-exporter"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RequeueAfter != 0 {
+		t.Errorf("expected no periodic requeue without a database, got %s", res.RequeueAfter)
+	}
+	if db.queries != 0 {
+		t.Errorf("expected no PuppetDB queries, got %d", db.queries)
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "ovx", Name: "node-exporter-0"}, &discoveryv1.EndpointSlice{}); err == nil {
+		t.Error("expected the EndpointSlice to be removed")
+	}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "ovx", Name: "node-exporter"}, &corev1.Service{}); err == nil {
+		t.Error("expected the headless Service to be removed")
+	}
+	got := &openvoxv1alpha1.VoxDiscovery{}
+	_ = k8sClient.Get(ctx, types.NamespacedName{Namespace: "ovx", Name: "node-exporter"}, got)
+	c := meta.FindStatusCondition(got.Status.Conditions, "Ready")
+	if c == nil || c.Reason != "DatabaseDisabled" || got.Status.EndpointSliceCount != 0 {
+		t.Errorf("expected Ready=False/DatabaseDisabled and no slices, got %+v / %+v", c, got.Status)
 	}
 }
