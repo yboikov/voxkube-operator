@@ -8,6 +8,9 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Added
+- Weekly GHCR cleanup workflow: keeps release/version tags, `latest` and the newest 20 commit builds per image.
+
 ## [0.1.0]: first release
 
 ### Added

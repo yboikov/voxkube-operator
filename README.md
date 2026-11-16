@@ -840,6 +840,8 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
    - **CLI:** `git tag -a v0.2.0 -m "VoxKube v0.2.0" && git push origin v0.2.0` (CI creates the release itself).
 3. CI builds and pushes the images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and attaches the chart package and `voxkube-crds.yaml` to the release (creating it with generated notes if it doesn't exist yet). If the tag doesn't match `Chart.yaml`, the run fails: delete the release and tag, fix `Chart.yaml`, and try again.
 
+**Registry cleanup.** `.github/workflows/ghcr-cleanup.yaml` runs every Sunday. It keeps `latest`, every tag containing a dot (`0.1.0`, `0.1`, `8.18.0`, `8.18.0-<sha>`) and the newest 20 `<sha>` builds per image, and deletes the rest, including untagged leftovers (never manifests still referenced by a kept image). Run it from the Actions tab with **dry run** (the default for manual runs) to preview.
+
 Helm does not upgrade CRDs. After upgrading the chart, apply the new CRDs: `kubectl apply --server-side -f https://github.com/yboikov/voxkube-operator/releases/download/v0.2.0/voxkube-crds.yaml`.
 
 ## Development & Local Testing

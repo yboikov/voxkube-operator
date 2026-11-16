@@ -1,0 +1,53 @@
+name: GHCR Cleanup
+
+# Removes old container image versions from ghcr.io so private package storage doesn't grow forever.
+#
+# Kept, always:
+#   - release and OpenVox version tags: anything with a dot (0.1.0, 0.1, 8.18.0, 8.18.0-<sha>)
+#   - latest
+#   - per-platform and attestation manifests that a kept image still references (the action checks this)
+# Deleted:
+#   - untagged versions left behind when a tag moves to a newer build
+#   - <sha>-only builds beyond the newest KEEP_SHA_BUILDS per image
+#
+# Run it manually with "dry_run" first to see what would be deleted.
+
+on:
+  schedule:
+    - cron: "30 4 * * 0" # Sundays 04:30 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only log what would be deleted"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ghcr-cleanup
+  cancel-in-progress: false
+
+env:
+  KEEP_SHA_BUILDS: "20"
+
+jobs:
+  cleanup:
+    name: Clean up ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [voxkube-operator, openvox-server, openvox-db]
+    steps:
+      - name: Delete old ${{ matrix.package }} versions
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package: ${{ matrix.package }}
+          exclude-tags: "latest,*.*"
+          keep-n-tagged: ${{ env.KEEP_SHA_BUILDS }}
+          delete-untagged: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+          token: ${{ secrets.GITHUB_TOKEN }}
