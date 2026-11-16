@@ -42,3 +42,23 @@ func TestPinnedOpenVoxVersionsAreConsistent(t *testing.T) {
 		t.Errorf("OpenVox Server (%s) and OpenVoxDB (%s) should be released together on the same version", server, db)
 	}
 }
+
+// TestChartVersionMatchesAppVersion keeps the chart and operator release in lockstep: the chart's default
+// operator image tag is appVersion, and the release workflow requires tag == version == appVersion.
+func TestChartVersionMatchesAppVersion(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "charts", "voxkube-operator", "Chart.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := regexp.MustCompile(`(?m)^version:\s*"?([^"\s]+)`).FindStringSubmatch(string(b))
+	appVersion := regexp.MustCompile(`(?m)^appVersion:\s*"?([^"\s]+)`).FindStringSubmatch(string(b))
+	if version == nil || appVersion == nil {
+		t.Fatal("Chart.yaml must define version and appVersion")
+	}
+	if version[1] != appVersion[1] {
+		t.Errorf("Chart.yaml version %s != appVersion %s; bump both together", version[1], appVersion[1])
+	}
+	if !regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`).MatchString(version[1]) {
+		t.Errorf("Chart.yaml version %q is not SemVer", version[1])
+	}
+}

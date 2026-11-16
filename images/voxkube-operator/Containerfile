@@ -7,11 +7,21 @@ COPY cmd/ cmd/
 COPY api/ api/
 COPY internal/ internal/
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a -o manager ./cmd/main.go
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -a \
+      -ldflags "-s -w \
+        -X github.com/yboikov/voxkube-operator/internal/version.Version=${VERSION} \
+        -X github.com/yboikov/voxkube-operator/internal/version.Commit=${COMMIT} \
+        -X github.com/yboikov/voxkube-operator/internal/version.BuildDate=${BUILD_DATE}" \
+      -o manager ./cmd/main.go
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1794186349
 
+ARG VERSION=dev
 LABEL org.opencontainers.image.title="VoxKube Operator" \
+      org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.description="VoxKube - OpenShift and Kubernetes-native Operator for OpenVox and Puppet" \
       org.opencontainers.image.vendor="yboikov" \
       org.opencontainers.image.url="https://github.com/yboikov/voxkube-operator" \

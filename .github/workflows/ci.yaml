@@ -69,6 +69,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Operator version: the tag on releases (v0.1.0 -> 0.1.0), otherwise <chart version>-dev.<sha>.
+      - name: Determine operator version
+        id: opver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(grep -m1 -oP '^version:\s*\K\S+' charts/voxkube-operator/Chart.yaml)-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "Operator version: $v"
+
       - name: Read pinned OpenVox version
         id: ver
         if: matrix.version_arg != ''
@@ -77,10 +90,6 @@ jobs:
           test -n "$v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Pinned ${{ matrix.version_arg }}=$v"
-
-      - name: Set up QEMU for multi-arch builds
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -107,19 +116,68 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=${{ steps.ver.outputs.version }},enable=${{ steps.ver.outputs.version != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
             type=sha,prefix=${{ steps.ver.outputs.version }}-,enable=${{ steps.ver.outputs.version != '' }}
-            type=semver,pattern={{version}}
+            type=semver,pattern={{version}},enable=${{ matrix.image == 'voxkube-operator' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ matrix.image == 'voxkube-operator' }}
           labels: |
-            org.opencontainers.image.version=${{ steps.ver.outputs.version || github.sha }}
+            org.opencontainers.image.version=${{ steps.ver.outputs.version || steps.opver.outputs.version }}
 
-      # Pull requests build amd64 only and push nothing, so a bad pin fails before merge.
+      # Pull requests build and push nothing, so a bad pin fails before merge.
       - name: Build ${{ github.event_name == 'pull_request' && '' || 'and push ' }}${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.file }}
-          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.opver.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.opver.outputs.build_date }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  # Release: runs only for v* tags, after all images are pushed.
+  #   1. the tag must equal Chart.yaml version and appVersion (v0.1.0 <-> 0.1.0)
+  #   2. the chart is pushed to oci://ghcr.io/<owner>/charts
+  #   3. a GitHub Release is created with generated notes, the chart and the CRDs
+  release:
+    name: Release ${{ github.ref_name }}
+    needs: build-images
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Check that the tag matches the chart
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(grep -m1 -oP '^version:\s*\K\S+' charts/voxkube-operator/Chart.yaml)
+          app=$(grep -m1 -oP '^appVersion:\s*"?\K[^"\s]+' charts/voxkube-operator/Chart.yaml)
+          echo "tag=$tag chart=$version appVersion=$app"
+          if [ "$tag" != "$version" ] || [ "$tag" != "$app" ]; then
+            echo "::error::Tag v$tag must match Chart.yaml version ($version) and appVersion ($app). Bump them in a PR before tagging."
+            exit 1
+          fi
+
+      - name: Package and push the Helm chart
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package charts/voxkube-operator --destination dist
+          helm push dist/voxkube-operator-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"
+          cat config/crd/bases/*.yaml > dist/voxkube-crds.yaml
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/voxkube-operator-*.tgz dist/voxkube-crds.yaml \
+            --title "VoxKube $GITHUB_REF_NAME" --generate-notes --verify-tag
