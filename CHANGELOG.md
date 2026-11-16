@@ -8,6 +8,11 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Fixed
+- `VoxDiscovery` no longer polls a non-existent OpenVox DB when the `VoxCluster` has `database.enabled: false`.
+  It removes its Service, EndpointSlices and ServiceMonitor, reports `Ready=False` (`DatabaseDisabled`), and
+  resumes automatically when the database is enabled.
+
 ## [0.1.0]: first release
 
 ### Added
