@@ -1,0 +1,28 @@
+# Changelog
+
+All notable changes to VoxKube are documented here. The project follows [Semantic Versioning](https://semver.org/).
+While the API is `v1alpha1`, minor releases (`0.y.0`) may contain breaking changes; they are listed under
+**Breaking**.
+
+GitHub Releases also carry auto-generated notes from merged pull requests.
+
+## [Unreleased]
+
+## [0.1.0]: first release
+
+### Added
+- `VoxCluster`, `VoxNode` and `VoxDiscovery` (`voxkube.io/v1alpha1`), with the full API reference in the README.
+- PKI: the operator generates the CA once and keeps it on VoxCluster deletion; the service certificate is
+  renewed automatically; the CRL is synced from the CA to the compilers.
+- CA autosign modes `voxnode`, `off`, `true` and `psk`; VoxNode auto-creation from CA state.
+- OpenVox DB with external PostgreSQL (CloudNativePG) or ephemeral built-in PostgreSQL (dev/demo).
+- Compilers send facts, catalogs and reports to OpenVox DB; ENC modes `voxnode`, `externalHttp` and `none`;
+  report webhook; HorizontalPodAutoscaler.
+- Code delivery via g10k (GitHub App, HTTPS token or SSH key; synchronized rollout or sidecar), PVC,
+  image volume, or a demo environment.
+- Honest status phases and conditions on all resources.
+- Pinned OpenVox Server and OpenVoxDB **8.18.0** images, with Renovate-driven updates.
+- Versioned operator builds (`--version`, startup log), release pipeline (images, OCI Helm chart, GitHub Release).
+
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/yboikov/voxkube-operator/releases/tag/v0.1.0

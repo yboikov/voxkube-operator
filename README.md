@@ -74,12 +74,25 @@ flowchart TD
 
 ### Step 1: Install the Operator via Helm
 
+From a release (recommended; the chart pins the matching operator image):
+
+```bash
+helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
+  --version 0.1.0 \
+  --namespace openvox \
+  --create-namespace
+```
+
+From a checkout of `main` (unreleased code), pin the operator image to a commit:
+
 ```bash
 helm upgrade --install voxkube-operator ./charts/voxkube-operator \
   --namespace openvox \
   --create-namespace \
-  --set image.tag=latest
+  --set image.tag=<short git sha>   # every main build is pushed as ghcr.io/yboikov/voxkube-operator:<sha>
 ```
+
+Check what is running with `kubectl -n openvox logs deploy/voxkube-operator | head -1`, which prints the operator version, commit and default OpenVox images.
 
 ### Step 2: Create a `VoxCluster`
 
@@ -805,6 +818,25 @@ Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release a
 - In cluster-wide mode the operator caches all Secrets (needed for the label-based Hiera bridge). Use `--watch-namespace` to limit this.
 
 ---
+
+## Versioning & Releases
+
+VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor releases (`0.y.0`) may contain breaking changes, listed in [CHANGELOG.md](CHANGELOG.md).
+
+| Artifact | Versioned as |
+|---|---|
+| Operator image `ghcr.io/yboikov/voxkube-operator` | `0.1.0`, `0.1` (releases); `<sha>` and `latest` (every `main` build) |
+| Helm chart `oci://ghcr.io/yboikov/charts/voxkube-operator` | `0.1.0`. The chart `version` always equals `appVersion`, so a chart release installs the same operator release. |
+| Operator binary | `--version` and the first log line show version, commit and build date; `dev` for local builds. Unreleased `main` builds report `<chart version>-dev.<sha>`. |
+| OpenVox images | Pinned to the OpenVox version, independent of the operator version (see [Image versions](#image-versions)). |
+
+**Releasing**
+
+1. In a PR: set `version` and `appVersion` in `charts/voxkube-operator/Chart.yaml` to the new version, and move the `[Unreleased]` entries in `CHANGELOG.md` under it. Merge.
+2. Tag the merge commit on `main` and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+3. CI builds and pushes the multi-arch images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and creates the GitHub Release with generated notes, the chart package and `voxkube-crds.yaml`.
+
+Helm does not upgrade CRDs. After upgrading the chart, apply the new CRDs: `kubectl apply --server-side -f https://github.com/yboikov/voxkube-operator/releases/download/v0.2.0/voxkube-crds.yaml`.
 
 ## Development & Local Testing
 

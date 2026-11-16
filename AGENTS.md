@@ -71,6 +71,9 @@ update that section in the same change. Never document a field as working unless
    `templates/voxcluster.yaml`, and the README examples. Renovate does this automatically. Never go back to
    unversioned `dnf install openvox-server` or `:latest` defaults, and stay on 8.x unless the owner decides to
    move to OpenVox 9 (which needs the `openvox9` repo and has breaking changes).
+9. Operator releases follow SemVer (README → "Versioning & Releases"). Add user-visible changes to the
+   `[Unreleased]` section of `CHANGELOG.md` in the same PR. Only the owner tags releases; a release PR bumps
+   `version` and `appVersion` in `Chart.yaml` together (a test enforces that they are equal).
 
 ## Known limitations / backlog
 

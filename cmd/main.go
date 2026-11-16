@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,6 +17,7 @@ import (
 
 	voxkubev1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
 	"github.com/yboikov/voxkube-operator/internal/controller"
+	"github.com/yboikov/voxkube-operator/internal/version"
 )
 
 var (
@@ -44,10 +46,19 @@ func main() {
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to restrict the operator to. If empty, watches all namespaces.")
 
 	opts := zap.Options{Development: false}
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Print the operator version and exit.")
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
+	if showVersion {
+		fmt.Println(version.String())
+		os.Exit(0)
+	}
+
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	setupLog.Info("starting voxkube-operator", "version", version.Version, "commit", version.Commit, "buildDate", version.BuildDate,
+		"defaultOpenVoxServerImage", controller.DefaultOpenVoxServerImage, "defaultOpenVoxDBImage", controller.DefaultOpenVoxDBImage)
 
 	mgrOptions := ctrl.Options{
 		Scheme:                 scheme,
