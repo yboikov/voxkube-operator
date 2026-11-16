@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "OpenVox Server version: Containerfile ARG",
+      "managerFilePatterns": ["/^images/openvox-server/Containerfile$/"],
+      "matchStrings": ["ARG OPENVOX_SERVER_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "OpenVoxProject/openvox-server"
+    },
+    {
+      "customType": "regex",
+      "description": "OpenVoxDB version: Containerfile ARGs (DB image and termini in the server image)",
+      "managerFilePatterns": ["/^images/openvox-(server|db)/Containerfile$/"],
+      "matchStrings": ["ARG OPENVOXDB_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "OpenVoxProject/openvoxdb"
+    },
+    {
+      "customType": "regex",
+      "description": "OpenVox versions: operator defaults (renovate comments)",
+      "managerFilePatterns": ["/^internal/controller/versions\\.go$/"],
+      "matchStrings": ["// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+\\s*=\\s*\"(?<currentValue>[^\"]+)\""]
+    },
+    {
+      "customType": "regex",
+      "description": "OpenVox Server image tag in the chart and README",
+      "managerFilePatterns": ["/^charts/voxkube-operator/(values\\.yaml|templates/voxcluster\\.yaml)$/", "/^README\\.md$/"],
+      "matchStrings": ["ghcr\\.io/yboikov/openvox-server:(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "OpenVoxProject/openvox-server"
+    },
+    {
+      "customType": "regex",
+      "description": "OpenVox DB image tag in the chart and README",
+      "managerFilePatterns": ["/^charts/voxkube-operator/(values\\.yaml|templates/voxcluster\\.yaml)$/", "/^README\\.md$/"],
+      "matchStrings": ["ghcr\\.io/yboikov/openvox-db:(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "OpenVoxProject/openvoxdb"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Bump OpenVox Server and DB together, and stay on OpenVox 8 (the images use the openvox8 repo)",
+      "matchPackageNames": ["OpenVoxProject/openvox-server", "OpenVoxProject/openvoxdb"],
+      "groupName": "OpenVox",
+      "allowedVersions": "<9.0.0",
+      "ignoreUnstable": true
+    }
+  ]
+}

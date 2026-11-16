@@ -134,8 +134,9 @@ type ClusterCASpec struct {
 
 // ClusterServerSpec configures the OpenVox Server catalog compilers.
 type ClusterServerSpec struct {
-	// Image is the OpenVox Server container image.
-	// +kubebuilder:default="ghcr.io/yboikov/openvox-server:latest"
+	// Image is the OpenVox Server container image. When empty, the operator uses the OpenVox Server version it was
+	// released with (ghcr.io/yboikov/openvox-server:<version>, see internal/controller/versions.go).
+	// +optional
 	Image string `json:"image,omitempty"`
 
 	// ImagePullPolicy is the container image pull policy.
@@ -221,8 +222,9 @@ type ClusterDatabaseSpec struct {
 	// +kubebuilder:default=true
 	Enabled *bool `json:"enabled,omitempty"`
 
-	// Image is the OpenVox DB container image.
-	// +kubebuilder:default="ghcr.io/yboikov/openvox-db:latest"
+	// Image is the OpenVox DB container image. When empty, the operator uses the OpenVoxDB version it was
+	// released with (ghcr.io/yboikov/openvox-db:<version>, see internal/controller/versions.go).
+	// +optional
 	Image string `json:"image,omitempty"`
 
 	// Replicas is the number of OpenVox DB pods.

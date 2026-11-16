@@ -66,6 +66,11 @@ update that section in the same change. Never document a field as working unless
    `registry.access.redhat.com`, `quay.io` or `ghcr.io` images. (The build stages still use `docker.io/library/golang`,
    a known item to replace.)
 7. Keep `README.md` → "API Reference" accurate (see above), including the "Known limitations" list.
+8. OpenVox versions are pinned (README → "Image versions"). To change them, update **all** of: the `ARG ..._VERSION`
+   lines in `images/openvox-*/Containerfile`, `internal/controller/versions.go`, the chart's `values.yaml` and
+   `templates/voxcluster.yaml`, and the README examples. Renovate does this automatically. Never go back to
+   unversioned `dnf install openvox-server` or `:latest` defaults, and stay on 8.x unless the owner decides to
+   move to OpenVox 9 (which needs the `openvox9` repo and has breaking changes).
 
 ## Known limitations / backlog
 

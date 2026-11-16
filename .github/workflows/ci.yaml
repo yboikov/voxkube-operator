@@ -49,9 +49,8 @@ jobs:
           helm template voxkube charts/voxkube-operator --set cluster.enabled=true > /dev/null
 
   build-images:
-    name: Build & Push ${{ matrix.image }}
+    name: Build ${{ github.event_name == 'pull_request' && '(no push)' || '& Push' }} ${{ matrix.image }}
     needs: lint-and-test
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -59,27 +58,45 @@ jobs:
         include:
           - image: voxkube-operator
             file: images/voxkube-operator/Containerfile
+            version_arg: ""
           - image: openvox-server
             file: images/openvox-server/Containerfile
+            version_arg: OPENVOX_SERVER_VERSION
           - image: openvox-db
             file: images/openvox-db/Containerfile
+            version_arg: OPENVOXDB_VERSION
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Read pinned OpenVox version
+        id: ver
+        if: matrix.version_arg != ''
+        run: |
+          v=$(grep -m1 -oP "^ARG ${{ matrix.version_arg }}=\K\S+" "${{ matrix.file }}")
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Pinned ${{ matrix.version_arg }}=$v"
+
       - name: Set up QEMU for multi-arch builds
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry (GHCR)
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Tags for the OpenVox images on the default branch:
+      #   <version>        e.g. 8.15.0          (moves when the image is rebuilt for the same OpenVox version)
+      #   <version>-<sha>  e.g. 8.15.0-1a2b3c4  (immutable; use this or a digest in production)
+      #   <sha>, latest
       - name: Extract Docker metadata for ${{ matrix.image }}
         id: meta
         uses: docker/metadata-action@v5
@@ -88,15 +105,20 @@ jobs:
           tags: |
             type=sha,prefix=
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ steps.ver.outputs.version != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=sha,prefix=${{ steps.ver.outputs.version }}-,enable=${{ steps.ver.outputs.version != '' }}
             type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.version=${{ steps.ver.outputs.version || github.sha }}
 
-      - name: Build and push ${{ matrix.image }}
+      # Pull requests build amd64 only and push nothing, so a bad pin fails before merge.
+      - name: Build ${{ github.event_name == 'pull_request' && '' || 'and push ' }}${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.file }}
-          platforms: linux/amd64,linux/arm64
-          push: true
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ matrix.image }}
