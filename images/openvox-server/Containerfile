@@ -13,6 +13,7 @@ FROM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
 ARG OPENVOX_SERVER_VERSION=8.15.0
 ARG OPENVOXDB_VERSION=8.15.0
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
+    echo "=== AVAILABLE ===" && dnf --showduplicates list available openvox-server openvoxdb-termini openvoxdb openvox-agent 2>&1 | grep -E '^openvox' | tail -40 && echo "=== END ===" && \
     dnf install -y --setopt=install_weak_deps=False \
         "openvox-server-${OPENVOX_SERVER_VERSION}" \
         "openvoxdb-termini-${OPENVOXDB_VERSION}" && \
