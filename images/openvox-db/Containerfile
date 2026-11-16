@@ -1,7 +1,7 @@
 # Stage 1: Install OpenVox DB from official Vox Pupuli RPM repository
 FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
 # Pinned version. Bump it together with internal/controller/versions.go and the chart (Renovate does this).
-ARG OPENVOXDB_VERSION=8.15.0
+ARG OPENVOXDB_VERSION=8.18.0
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
     dnf install -y --setopt=install_weak_deps=False "openvoxdb-${OPENVOXDB_VERSION}" && \
     rpm -q openvoxdb | tee /openvox-packages.txt && \
@@ -12,7 +12,7 @@ RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm &&
 FROM registry.access.redhat.com/ubi9/ubi:latest
 ARG JDK_VERSION=21
 
-ARG OPENVOXDB_VERSION=8.15.0
+ARG OPENVOXDB_VERSION=8.18.0
 LABEL org.opencontainers.image.title="VoxKube OpenVox DB" \
       org.opencontainers.image.version="${OPENVOXDB_VERSION}" \
       org.opencontainers.image.description="Rootless OpenVox DB (PuppetDB) for Kubernetes and OpenShift" \

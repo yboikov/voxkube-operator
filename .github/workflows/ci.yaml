@@ -94,8 +94,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Tags for the OpenVox images on the default branch:
-      #   <version>        e.g. 8.15.0          (moves when the image is rebuilt for the same OpenVox version)
-      #   <version>-<sha>  e.g. 8.15.0-1a2b3c4  (immutable; use this or a digest in production)
+      #   <version>        e.g. 8.18.0          (moves when the image is rebuilt for the same OpenVox version)
+      #   <version>-<sha>  e.g. 8.18.0-1a2b3c4  (immutable; use this or a digest in production)
       #   <sha>, latest
       - name: Extract Docker metadata for ${{ matrix.image }}
         id: meta

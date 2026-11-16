@@ -11,9 +11,9 @@ package controller
 // Renovate bumps all of them in one PR (see renovate.json).
 const (
 	// renovate: datasource=github-releases depName=OpenVoxProject/openvox-server
-	DefaultOpenVoxServerVersion = "8.15.0"
+	DefaultOpenVoxServerVersion = "8.18.0"
 	// renovate: datasource=github-releases depName=OpenVoxProject/openvoxdb
-	DefaultOpenVoxDBVersion = "8.15.0"
+	DefaultOpenVoxDBVersion = "8.18.0"
 
 	DefaultOpenVoxServerImage = "ghcr.io/yboikov/openvox-server:" + DefaultOpenVoxServerVersion
 	DefaultOpenVoxDBImage     = "ghcr.io/yboikov/openvox-db:" + DefaultOpenVoxDBVersion

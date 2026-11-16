@@ -18,12 +18,12 @@ spec:
       generateTypes: {{ .Values.cluster.code.git.generateTypes }}
     {{- end }}
   server:
-    image: {{ .Values.cluster.server.image | default "ghcr.io/yboikov/openvox-server:8.15.0" | quote }}
+    image: {{ .Values.cluster.server.image | default "ghcr.io/yboikov/openvox-server:8.18.0" | quote }}
     replicas: {{ .Values.cluster.server.replicas | default 2 }}
     javaArgs: {{ .Values.cluster.server.javaArgs | default "-Xms1g -Xmx1g" | quote }}
   database:
     enabled: {{ .Values.cluster.database.enabled }}
-    image: {{ .Values.cluster.database.image | default "ghcr.io/yboikov/openvox-db:8.15.0" | quote }}
+    image: {{ .Values.cluster.database.image | default "ghcr.io/yboikov/openvox-db:8.18.0" | quote }}
     postgres:
       mode: {{ .Values.cluster.database.postgres.mode | default "builtin" }}
       {{- with .Values.cluster.database.postgres.host }}

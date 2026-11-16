@@ -31,7 +31,7 @@ Running Puppet / OpenVox inside Kubernetes or OpenShift traditionally hits four 
 4. **First-Party Multi-Arch Container Images (`linux/amd64` & `linux/arm64`)**:
    - Built directly from official Vox Pupuli OpenVox 8 packages (`yum.voxpupuli.org`) on Red Hat UBI 9 via GitHub Actions:
      - `ghcr.io/yboikov/voxkube-operator:<git sha>` (and `latest`)
-     - `ghcr.io/yboikov/openvox-server:8.15.0` / `ghcr.io/yboikov/openvox-db:8.15.0`
+     - `ghcr.io/yboikov/openvox-server:8.18.0` / `ghcr.io/yboikov/openvox-db:8.18.0`
    - OpenVox versions are **pinned** (see [Image versions](#image-versions)), never "whatever the repo has today".
 
 ---
@@ -97,12 +97,12 @@ spec:
   ca:
     storageSize: 2Gi
   server:
-    image: ghcr.io/yboikov/openvox-server:8.15.0
+    image: ghcr.io/yboikov/openvox-server:8.18.0
     replicas: 2
     javaArgs: "-Xms512m -Xmx512m"
   database:
     enabled: true
-    image: ghcr.io/yboikov/openvox-db:8.15.0
+    image: ghcr.io/yboikov/openvox-db:8.18.0
     postgres:
       mode: builtin # ephemeral, dev/demo only; use mode: external (e.g. CloudNativePG) in production
   networking:
@@ -792,8 +792,8 @@ Tags pushed from `main` for each OpenVox image:
 
 | Tag | Example | Mutable? |
 |---|---|---|
-| `<version>` | `8.15.0` | Moves when the image is rebuilt (e.g. base image updates) for the same OpenVox version. |
-| `<version>-<sha>` | `8.15.0-1a2b3c4` | **Immutable.** Use this, or a digest, for production GitOps. |
+| `<version>` | `8.18.0` | Moves when the image is rebuilt (e.g. base image updates) for the same OpenVox version. |
+| `<version>-<sha>` | `8.18.0-1a2b3c4` | **Immutable.** Use this, or a digest, for production GitOps. |
 | `<sha>`, `latest` | | `latest` follows `main`. |
 
 Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release appears, updating every location above. It never proposes 9.x, because the images use the `openvox8` repository. Keep the server and DB on the same version. Pull requests build the images (amd64, no push), so a bad pin fails before merge.

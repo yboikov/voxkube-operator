@@ -10,10 +10,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/voxpupul
 # Built for the target platform: openvox-agent ships native Ruby binaries (used by `puppet generate types`).
 FROM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
 # Pinned versions. Bump them together with internal/controller/versions.go and the chart (Renovate does this).
-ARG OPENVOX_SERVER_VERSION=8.15.0
-ARG OPENVOXDB_VERSION=8.15.0
+ARG OPENVOX_SERVER_VERSION=8.18.0
+ARG OPENVOXDB_VERSION=8.18.0
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
-    echo "=== AVAILABLE ===" && dnf --showduplicates list available openvox-server openvoxdb-termini openvoxdb openvox-agent 2>&1 | grep -E '^openvox' | tail -40 && echo "=== END ===" && \
     dnf install -y --setopt=install_weak_deps=False \
         "openvox-server-${OPENVOX_SERVER_VERSION}" \
         "openvoxdb-termini-${OPENVOXDB_VERSION}" && \
@@ -25,7 +24,7 @@ RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm &&
 FROM registry.access.redhat.com/ubi9/ubi:latest
 ARG JDK_VERSION=21
 
-ARG OPENVOX_SERVER_VERSION=8.15.0
+ARG OPENVOX_SERVER_VERSION=8.18.0
 LABEL org.opencontainers.image.title="VoxKube OpenVox Server" \
       org.opencontainers.image.version="${OPENVOX_SERVER_VERSION}" \
       org.opencontainers.image.description="Rootless OpenVox Server and CA for Kubernetes and OpenShift" \
