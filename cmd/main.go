@@ -81,6 +81,7 @@ func main() {
 		Recorder:       mgr.GetEventRecorder("voxcluster-controller"),
 		GitPoller:      controller.NewSmartHTTPGitPoller(nil),
 		TokenExchanger: controller.NewGitHubAppTokenExchanger(nil),
+		CAClient:       controller.NewHTTPCAClient(nil),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VoxCluster")
 		os.Exit(1)

@@ -29,7 +29,7 @@ const (
 
 // RenderHieraSecretsBundle collects ESO and cert-manager Secrets for a VoxCluster and its VoxNodes,
 // and returns a map of filename -> YAML content to be stored in the cluster's Hiera Secret.
-// Every injected key is automatically added to lookup_options with convert_to: "Sensitive"
+// Every injected key (including the openvox::certs hash) is added to lookup_options with convert_to: "Sensitive"
 // so secrets and TLS private keys never leak in Puppet logs or PuppetDB reports.
 func RenderHieraSecretsBundle(
 	ctx context.Context,
@@ -241,11 +241,10 @@ func marshalHieraYAMLWithSensitive(data map[string]interface{}) ([]byte, error) 
 
 	for _, k := range keys {
 		out[k] = data[k]
-		// Mark every flat secret key and TLS private key as Sensitive in Puppet Hiera
-		if k != "openvox::certs" {
-			lookupOpts[k] = map[string]interface{}{
-				"convert_to": "Sensitive",
-			}
+		// Every key is wrapped in Sensitive, including the openvox::certs hash (which carries private keys);
+		// Puppet code must call .unwrap to read the values.
+		lookupOpts[k] = map[string]interface{}{
+			"convert_to": "Sensitive",
 		}
 	}
 

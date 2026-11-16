@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	openvoxv1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
 )
+
+// ErrNodeNotFound is returned when PuppetDB has no record of a certname.
+var ErrNodeNotFound = errors.New("node not found in PuppetDB")
 
 // DiscoveredPuppetNode represents an active node and its facts returned from OpenVox DB (PuppetDB).
 type DiscoveredPuppetNode struct {
@@ -19,15 +24,38 @@ type DiscoveredPuppetNode struct {
 	Environment string                 `json:"environment"`
 	Deactivated *string                `json:"deactivated"`
 	Facts       map[string]interface{} `json:"facts"`
-	Classes     []string               `json:"classes,omitempty"`
 }
 
-// OpenVoxDBClient interacts with OpenVox DB (PuppetDB) for node deactivation and inventory discovery.
+// PuppetDBNode is the subset of /pdb/query/v4/nodes/<certname> used for VoxNode status.
+type PuppetDBNode struct {
+	Certname           string     `json:"certname"`
+	Deactivated        *time.Time `json:"deactivated"`
+	Expired            *time.Time `json:"expired"`
+	ReportTimestamp    *time.Time `json:"report_timestamp"`
+	FactsTimestamp     *time.Time `json:"facts_timestamp"`
+	CatalogTimestamp   *time.Time `json:"catalog_timestamp"`
+	LatestReportStatus string     `json:"latest_report_status"`
+}
+
+// LastSeen returns the most recent of the node's report, facts and catalog timestamps.
+func (n *PuppetDBNode) LastSeen() *time.Time {
+	var latest *time.Time
+	for _, t := range []*time.Time{n.ReportTimestamp, n.FactsTimestamp, n.CatalogTimestamp} {
+		if t != nil && (latest == nil || t.After(*latest)) {
+			latest = t
+		}
+	}
+	return latest
+}
+
+// OpenVoxDBClient interacts with OpenVox DB (PuppetDB).
 type OpenVoxDBClient interface {
 	// DeactivateNode sends the "deactivate node" v3 command to OpenVox DB (POST /pdb/cmd/v1).
 	DeactivateNode(ctx context.Context, dbBaseURL, certname string) error
-	// QueryActiveNodes queries /pdb/query/v4/inventory for active nodes matching the selector.
+	// QueryActiveNodes returns active nodes matching the selector (PQL inventory query + fact filters).
 	QueryActiveNodes(ctx context.Context, dbBaseURL string, selector openvoxv1alpha1.DiscoverySelectorSpec) ([]DiscoveredPuppetNode, error)
+	// GetNode returns PuppetDB's record of a node, or ErrNodeNotFound.
+	GetNode(ctx context.Context, dbBaseURL, certname string) (*PuppetDBNode, error)
 }
 
 // HTTPPuppetDBClient implements OpenVoxDBClient over HTTP/HTTPS.
@@ -59,7 +87,7 @@ func (c *HTTPPuppetDBClient) DeactivateNode(ctx context.Context, dbBaseURL, cert
 	if dbBaseURL == "" {
 		return nil
 	}
-	url := fmt.Sprintf("%s/pdb/cmd/v1", strings.TrimRight(dbBaseURL, "/"))
+	u := fmt.Sprintf("%s/pdb/cmd/v1", strings.TrimRight(dbBaseURL, "/"))
 	envelope := pdbCommandEnvelope{
 		Command: "deactivate node",
 		Version: 3,
@@ -74,7 +102,7 @@ func (c *HTTPPuppetDBClient) DeactivateNode(ctx context.Context, dbBaseURL, cert
 		return err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -93,13 +121,79 @@ func (c *HTTPPuppetDBClient) DeactivateNode(ctx context.Context, dbBaseURL, cert
 	return nil
 }
 
-// QueryActiveNodes queries /pdb/query/v4/inventory and filters active nodes by environment, facts, and classes.
+// GetNode queries GET /pdb/query/v4/nodes/<certname>.
+func (c *HTTPPuppetDBClient) GetNode(ctx context.Context, dbBaseURL, certname string) (*PuppetDBNode, error) {
+	if dbBaseURL == "" {
+		return nil, fmt.Errorf("database URL is not known yet")
+	}
+	u := fmt.Sprintf("%s/pdb/query/v4/nodes/%s", strings.TrimRight(dbBaseURL, "/"), url.PathEscape(certname))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrNodeNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("PuppetDB node query %s returned HTTP %d: %s", certname, resp.StatusCode, string(msg))
+	}
+	var n PuppetDBNode
+	if err := json.NewDecoder(resp.Body).Decode(&n); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
+// pqlString quotes s as a PQL string literal.
+func pqlString(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
+}
+
+// puppetClassTitle converts "profile::node_exporter" to the catalog resource title "Profile::Node_exporter".
+func puppetClassTitle(class string) string {
+	parts := strings.Split(strings.TrimPrefix(class, "::"), "::")
+	for i, p := range parts {
+		if p != "" {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, "::")
+}
+
+// BuildDiscoveryPQL renders the PQL inventory query for a VoxDiscovery selector.
+// Environment, classes and the raw PQL expression are evaluated by PuppetDB; fact matches are applied client-side
+// so that booleans and numbers compare as strings.
+func BuildDiscoveryPQL(selector openvoxv1alpha1.DiscoverySelectorSpec) string {
+	conds := []string{`certname in nodes[certname] { node_state = "active" }`}
+	if selector.Environment != "" {
+		conds = append(conds, "environment = "+pqlString(selector.Environment))
+	}
+	for _, cls := range selector.Classes {
+		if strings.TrimSpace(cls) == "" {
+			continue
+		}
+		conds = append(conds, fmt.Sprintf(`certname in resources[certname] { type = "Class" and title = %s }`, pqlString(puppetClassTitle(cls))))
+	}
+	if pql := strings.TrimSpace(selector.PQL); pql != "" {
+		conds = append(conds, "("+pql+")")
+	}
+	return "inventory[certname, environment, facts] { " + strings.Join(conds, " and ") + " }"
+}
+
+// QueryActiveNodes runs the selector's PQL query against GET /pdb/query/v4 and applies fact filters.
 func (c *HTTPPuppetDBClient) QueryActiveNodes(ctx context.Context, dbBaseURL string, selector openvoxv1alpha1.DiscoverySelectorSpec) ([]DiscoveredPuppetNode, error) {
 	if dbBaseURL == "" {
 		return nil, nil
 	}
-	url := fmt.Sprintf("%s/pdb/query/v4/inventory", strings.TrimRight(dbBaseURL, "/"))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	u := fmt.Sprintf("%s/pdb/query/v4?query=%s", strings.TrimRight(dbBaseURL, "/"), url.QueryEscape(BuildDiscoveryPQL(selector)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -126,7 +220,7 @@ func (c *HTTPPuppetDBClient) QueryActiveNodes(ctx context.Context, dbBaseURL str
 		if node.Deactivated != nil && *node.Deactivated != "" {
 			continue
 		}
-		if !matchesDiscoverySelector(node, selector) {
+		if !matchesDiscoveryFacts(node, selector) {
 			continue
 		}
 		matched = append(matched, node)
@@ -134,25 +228,13 @@ func (c *HTTPPuppetDBClient) QueryActiveNodes(ctx context.Context, dbBaseURL str
 	return matched, nil
 }
 
-func matchesDiscoverySelector(node DiscoveredPuppetNode, selector openvoxv1alpha1.DiscoverySelectorSpec) bool {
-	if selector.Environment != "" && node.Environment != selector.Environment {
+func matchesDiscoveryFacts(node DiscoveredPuppetNode, selector openvoxv1alpha1.DiscoverySelectorSpec) bool {
+	if selector.Environment != "" && node.Environment != "" && node.Environment != selector.Environment {
 		return false
 	}
 	for k, expected := range selector.Facts {
-		actual := LookupFactString(node.Facts, k)
-		if actual != expected {
+		if LookupFactString(node.Facts, k) != expected {
 			return false
-		}
-	}
-	if len(selector.Classes) > 0 {
-		classSet := make(map[string]bool, len(node.Classes))
-		for _, cls := range node.Classes {
-			classSet[cls] = true
-		}
-		for _, reqCls := range selector.Classes {
-			if !classSet[reqCls] {
-				return false
-			}
 		}
 	}
 	return true

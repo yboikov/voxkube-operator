@@ -26,7 +26,18 @@ spec:
     image: {{ .Values.cluster.database.image | default "ghcr.io/yboikov/openvox-db:latest" | quote }}
     postgres:
       mode: {{ .Values.cluster.database.postgres.mode | default "builtin" }}
-      storageSize: {{ .Values.cluster.database.postgres.storageSize | default "10Gi" }}
+      {{- with .Values.cluster.database.postgres.host }}
+      host: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.cluster.database.postgres.databaseName }}
+      databaseName: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.cluster.database.postgres.credentialsSecretRef }}
+      credentialsSecretRef: {{ . | quote }}
+      {{- end }}
+      {{- with .Values.cluster.database.postgres.sslMode }}
+      sslMode: {{ . }}
+      {{- end }}
     housekeeping:
       nodeTTL: {{ .Values.cluster.database.housekeeping.nodeTTL | default "7d" | quote }}
       nodePurgeTTL: {{ .Values.cluster.database.housekeeping.nodePurgeTTL | default "14d" | quote }}

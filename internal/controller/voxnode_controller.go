@@ -2,11 +2,11 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
-	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -20,14 +20,19 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	openvoxv1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
 )
 
 const (
-	// VoxNodeFinalizer ensures atomic CA clean and PuppetDB node deactivation before a VoxNode is deleted.
+	// VoxNodeFinalizer ensures CA clean and PuppetDB node deactivation before a VoxNode is deleted.
 	VoxNodeFinalizer = "voxkube.io/node-cleanup"
+
+	nodeRequeueWaiting = 30 * time.Second
+	nodeRequeueActive  = 5 * time.Minute
 )
 
 // VoxNodeReconciler reconciles a VoxNode object.
@@ -44,11 +49,9 @@ type VoxNodeReconciler struct {
 // +kubebuilder:rbac:groups=voxkube.io,resources=voxnodes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=cert-manager.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
 
-// Reconcile manages CSR signing, Kubernetes-native ENC, cert-manager SSL certificate provisioning,
-// Hiera Secret Bridge updates, and atomic CA + PuppetDB cleanup on Decommissioned or deletion.
+// Reconcile manages CSR signing, ENC, cert-manager certificates, Hiera data, PuppetDB status
+// and CA + PuppetDB cleanup on decommission or deletion.
 func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	node := &openvoxv1alpha1.VoxNode{}
 	if err := r.Get(ctx, req.NamespacedName, node); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -60,21 +63,18 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	cluster := &openvoxv1alpha1.VoxCluster{}
 	clusterFound := true
 	if err := r.Get(ctx, types.NamespacedName{Namespace: node.Namespace, Name: node.Spec.ClusterRef}, cluster); err != nil {
-		if apierrors.IsNotFound(err) {
-			clusterFound = false
-		} else {
+		if !apierrors.IsNotFound(err) {
 			return ctrl.Result{}, err
 		}
+		clusterFound = false
 	}
 
-	// Handle deletion via finalizer: atomically clean CA and deactivate node in PuppetDB
+	// Deletion: clean CA + PuppetDB, then release the finalizer.
 	if !node.DeletionTimestamp.IsZero() {
 		if controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
 			if clusterFound {
-				if err := r.decommissionNode(ctx, node, cluster); err != nil {
-					logger.Error(err, "failed to clean node from CA and PuppetDB during deletion")
-					return ctrl.Result{}, err
-				}
+				r.decommissionNode(ctx, node, cluster)
+				_ = r.refreshClusterHieraAndENC(ctx, cluster)
 			}
 			controllerutil.RemoveFinalizer(node, VoxNodeFinalizer)
 			if err := r.Update(ctx, node); err != nil {
@@ -84,7 +84,6 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure finalizer is registered
 	if !controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
 		controllerutil.AddFinalizer(node, VoxNodeFinalizer)
 		if err := r.Update(ctx, node); err != nil {
@@ -92,136 +91,196 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
+	status := node.Status.DeepCopy()
+	setReady := func(ok bool, reason, msg string) {
+		s := metav1.ConditionFalse
+		if ok {
+			s = metav1.ConditionTrue
+		}
+		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+			Type: "Ready", Status: s, ObservedGeneration: node.Generation, Reason: reason, Message: msg,
+		})
+	}
+
 	if !clusterFound {
-		node.Status.Phase = openvoxv1alpha1.NodePhaseError
-		meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: node.Generation,
-			Reason:             "ClusterNotFound",
-			Message:            fmt.Sprintf("VoxCluster %q not found", node.Spec.ClusterRef),
-		})
-		_ = r.Status().Update(ctx, node)
-		return ctrl.Result{}, nil
+		status.Phase = openvoxv1alpha1.NodePhaseError
+		setReady(false, "ClusterNotFound", fmt.Sprintf("VoxCluster %q not found", node.Spec.ClusterRef))
+		return ctrl.Result{}, r.updateVoxNodeStatus(ctx, req.NamespacedName, *status)
 	}
 
-	// Handle State: Decommissioned (atomic CA clean + PuppetDB deactivate node + cert-manager cleanup)
-	if node.Spec.State == openvoxv1alpha1.NodeStateDecommissioned {
-		if err := r.decommissionNode(ctx, node, cluster); err != nil {
-			return ctrl.Result{}, err
-		}
-		node.Status.Phase = openvoxv1alpha1.NodePhaseDecommissioned
-		node.Status.CACleaned = true
-		node.Status.PuppetDBDeactivated = true
-		node.Status.CertificateSigned = false
-		node.Status.ReadyCertificates = 0
-		meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: node.Generation,
-			Reason:             "NodeDecommissioned",
-			Message:            "Node certificate cleaned from CA and node deactivated in PuppetDB",
-		})
-		if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
-			return ctrl.Result{}, err
-		}
-		// Refresh cluster Hiera & ENC
-		_ = r.refreshClusterHieraAndENC(ctx, cluster)
-		return ctrl.Result{}, nil
-	}
+	var result ctrl.Result
+	switch node.Spec.State {
+	case openvoxv1alpha1.NodeStateDecommissioned:
+		r.decommissionNode(ctx, node, cluster)
+		status.Phase = openvoxv1alpha1.NodePhaseDecommissioned
+		status.CACleaned = true
+		status.PuppetDBDeactivated = true
+		status.CertificateSigned = false
+		status.ReadyCertificates = 0
+		setReady(true, "NodeDecommissioned", "Certificate cleaned from the CA and node deactivated in OpenVox DB")
 
-	// Handle State: Revoked (revoke cert on CA without deactivating history)
-	if node.Spec.State == openvoxv1alpha1.NodeStateRevoked {
-		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
-			if err := caClient.RevokeCert(ctx, caEndpoint(cluster), node.Spec.Certname); err != nil {
+	case openvoxv1alpha1.NodeStateRevoked:
+		caURL := cluster.Status.CAURL
+		if caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster); caClient != nil && caURL != "" {
+			if err := caClient.RevokeCert(ctx, caURL, node.Spec.Certname); err != nil {
 				return ctrl.Result{}, err
 			}
 		}
-		node.Status.Phase = openvoxv1alpha1.NodePhaseRevoked
-		node.Status.CertificateSigned = false
-		meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionTrue,
-			ObservedGeneration: node.Generation,
-			Reason:             "CertificateRevoked",
-			Message:            "Node certificate revoked on OpenVox CA",
-		})
-		if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
+		status.Phase = openvoxv1alpha1.NodePhaseRevoked
+		status.CertificateSigned = false
+		setReady(true, "CertificateRevoked", "Certificate revoked on the CA; compilers reject it once the CRL is synced")
+
+	case openvoxv1alpha1.NodeStatePendingApproval:
+		status.Phase = openvoxv1alpha1.NodePhasePendingCSR
+		msg := "Awaiting approval: set spec.state to Active to sign the CSR"
+		if cs, err := r.caStatus(ctx, cluster, node); err == nil && cs.State == "requested" {
+			msg = "CSR received; set spec.state to Active to sign it"
+		}
+		setReady(false, "PendingApproval", msg)
+
+	default: // Active
+		var err error
+		result, err = r.reconcileActive(ctx, node, cluster, status, setReady)
+		if err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
 	}
 
-	// Handle State: PendingApproval
-	if node.Spec.State == openvoxv1alpha1.NodeStatePendingApproval {
-		node.Status.Phase = openvoxv1alpha1.NodePhasePendingCSR
-		meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
-			Type:               "Ready",
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: node.Generation,
-			Reason:             "PendingApproval",
-			Message:            "Awaiting administrator approval (set spec.state: Active to sign CSR)",
-		})
-		if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
+	if node.Spec.State != openvoxv1alpha1.NodeStateActive && node.Spec.State != "" {
+		if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
 	}
+	if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, *status); err != nil {
+		return ctrl.Result{}, err
+	}
+	return result, nil
+}
 
-	// Default State: Active
-	// 1. Sign CSR on OpenVox CA (if not already signed)
-	fingerprint := node.Status.CertificateFingerprint
-	certSigned := node.Status.CertificateSigned
-	if !certSigned {
-		if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
-			fp, err := caClient.SignCSR(ctx, caEndpoint(cluster), node.Spec.Certname)
+func (r *VoxNodeReconciler) caStatus(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, node *openvoxv1alpha1.VoxNode) (*CertStatus, error) {
+	caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster)
+	if caClient == nil || cluster.Status.CAURL == "" {
+		return nil, fmt.Errorf("CA not available")
+	}
+	return caClient.GetCertStatus(ctx, cluster.Status.CAURL, node.Spec.Certname)
+}
+
+// reconcileActive signs the CSR when allowed, provisions certificates, refreshes ENC/Hiera and reads PuppetDB.
+func (r *VoxNodeReconciler) reconcileActive(
+	ctx context.Context,
+	node *openvoxv1alpha1.VoxNode,
+	cluster *openvoxv1alpha1.VoxCluster,
+	status *openvoxv1alpha1.VoxNodeStatus,
+	setReady func(bool, string, string),
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	requeue := nodeRequeueActive
+	waitingReason, waitingMsg := "", ""
+
+	caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster)
+	caURL := cluster.Status.CAURL
+	switch {
+	case !caEnabled(cluster):
+		// External CA: nothing to sign; treat the node as signed.
+		status.CertificateSigned = true
+	case caClient == nil:
+		status.CertificateSigned = true
+	case caURL == "":
+		waitingReason, waitingMsg = "AwaitingCA", "Waiting for the VoxCluster CA to come up"
+		requeue = nodeRequeueWaiting
+	default:
+		cs, err := caClient.GetCertStatus(ctx, caURL, node.Spec.Certname)
+		switch {
+		case errors.Is(err, ErrCertNotFound):
+			status.CertificateSigned = false
+			status.CertificateFingerprint = ""
+			waitingReason, waitingMsg = "AwaitingCSR", "No CSR from "+node.Spec.Certname+" yet; run 'puppet ssl bootstrap' (or 'puppet agent -t') on the node"
+			requeue = nodeRequeueWaiting
+		case err != nil:
+			logger.Info("CA not reachable; will retry", "certname", node.Spec.Certname, "reason", err.Error())
+			waitingReason, waitingMsg = "CAUnreachable", err.Error()
+			requeue = nodeRequeueWaiting
+		case cs.State == "revoked":
+			status.CertificateSigned = false
+			status.Phase = openvoxv1alpha1.NodePhaseError
+			setReady(false, "CertificateRevokedOnCA",
+				"The certificate is revoked on the CA. Set state Decommissioned (or delete and re-create the VoxNode) and let the agent submit a new CSR")
+			return ctrl.Result{}, nil
+		case cs.State == "requested" && autosignMode(cluster) == autosignOff:
+			status.CertificateSigned = false
+			waitingReason, waitingMsg = "AwaitingManualSigning", "autosignMode is off; sign the CSR with 'puppetserver ca sign' on the CA pod"
+			requeue = nodeRequeueWaiting
+		case cs.State == "requested":
+			signed, err := caClient.SignCSR(ctx, caURL, node.Spec.Certname)
 			if err != nil {
-				logger.Info("OpenVox CA CSR not pending or CA not reachable; continuing ENC and Hiera sync", "certname", node.Spec.Certname, "reason", err.Error())
+				waitingReason, waitingMsg = "SigningFailed", err.Error()
+				requeue = nodeRequeueWaiting
 			} else {
-				fingerprint = fp
-				certSigned = true
+				status.CertificateSigned = signed.State == "signed"
+				status.CertificateFingerprint = signed.Fingerprint
+				r.event(node, corev1.EventTypeNormal, "CertificateSigned", "Signed CSR for "+node.Spec.Certname)
 			}
-		} else {
-			certSigned = true
+		default: // signed
+			status.CertificateSigned = true
+			status.CertificateFingerprint = cs.Fingerprint
 		}
 	}
-	if certSigned && fingerprint == "" {
-		fingerprint = "sha256:signed-" + node.Spec.Certname
-	}
 
-	// 2. Reconcile cert-manager Certificate CRs for all requested SSL certificates on this VM
 	readyCerts, err := r.reconcileCertManagerCertificates(ctx, node)
 	if err != nil {
-		logger.Error(err, "failed to reconcile cert-manager Certificates for VoxNode")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("reconciling cert-manager Certificates: %w", err)
 	}
+	status.ReadyCertificates = readyCerts
+	status.CACleaned = false
+	status.PuppetDBDeactivated = false
 
-	// 3. Refresh cluster Hiera Secret & ENC ConfigMap so new node certs/secrets/classes are immediately live
 	if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
-		logger.Error(err, "failed to refresh cluster Hiera and ENC")
 		return ctrl.Result{}, err
 	}
 
-	node.Status.Phase = openvoxv1alpha1.NodePhaseActive
-	node.Status.CertificateSigned = certSigned
-	node.Status.CertificateFingerprint = fingerprint
-	node.Status.CACleaned = false
-	node.Status.PuppetDBDeactivated = false
-	node.Status.ReadyCertificates = readyCerts
-
-	meta.SetStatusCondition(&node.Status.Conditions, metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: node.Generation,
-		Reason:             "NodeActive",
-		Message:            "Node CSR signed, ENC classified, and certificates synced to Hiera",
-	})
-
-	if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, node.Status); err != nil {
-		return ctrl.Result{}, err
+	// Last check-in and report status from OpenVox DB.
+	seen := false
+	if dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster); dbClient != nil && cluster.Status.DatabaseURL != "" {
+		pn, err := dbClient.GetNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname)
+		switch {
+		case err == nil:
+			if t := pn.LastSeen(); t != nil {
+				mt := metav1.NewTime(*t)
+				status.LastSeenTime = &mt
+				seen = true
+			}
+			status.LastReportStatus = pn.LatestReportStatus
+		case !errors.Is(err, ErrNodeNotFound):
+			logger.V(1).Info("OpenVox DB not reachable", "reason", err.Error())
+		}
 	}
 
-	return ctrl.Result{}, nil
+	switch {
+	case waitingReason != "":
+		status.Phase = openvoxv1alpha1.NodePhasePendingCSR
+		if waitingReason == "CAUnreachable" && status.CertificateSigned {
+			status.Phase = openvoxv1alpha1.NodePhaseSigned
+		}
+		setReady(false, waitingReason, waitingMsg)
+	case !seen:
+		status.Phase = openvoxv1alpha1.NodePhaseSigned
+		setReady(true, "CertificateSigned", "Certificate signed; waiting for the first Puppet run to reach OpenVox DB")
+	default:
+		status.Phase = openvoxv1alpha1.NodePhaseActive
+		msg := "Node is signed, classified and reporting"
+		if status.LastReportStatus == "failed" {
+			msg = "Node is reporting, but its last Puppet run failed"
+		}
+		setReady(true, "NodeActive", msg)
+	}
+	return ctrl.Result{RequeueAfter: requeue}, nil
+}
+
+func (r *VoxNodeReconciler) event(obj runtime.Object, eventType, reason, msg string) {
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(obj, nil, eventType, reason, reason, "%s", msg)
 }
 
 func (r *VoxNodeReconciler) updateVoxNodeStatus(ctx context.Context, key types.NamespacedName, desired openvoxv1alpha1.VoxNodeStatus) error {
@@ -235,108 +294,45 @@ func (r *VoxNodeReconciler) updateVoxNodeStatus(ctx context.Context, key types.N
 	})
 }
 
-func (r *VoxNodeReconciler) caClientForCluster(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) OpenVoxCAClient {
-	if r.CAClient == nil {
-		return nil
-	}
-	if _, isHTTP := r.CAClient.(*HTTPCAClient); !isHTTP {
-		return r.CAClient
-	}
-	caSecName := cluster.Status.CASecretName
-	if caSecName == "" {
-		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
-	}
-	caSec := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecName}, caSec); err == nil {
-		if httpClient, err := NewMTLSHTTPClient(caSec.Data["ca.crt"], caSec.Data["tls.crt"], caSec.Data["tls.key"]); err == nil {
-			return NewHTTPCAClient(httpClient)
-		}
-	}
-	return r.CAClient
-}
-
-func (r *VoxNodeReconciler) dbClientForCluster(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) OpenVoxDBClient {
-	if r.DBClient == nil {
-		return nil
-	}
-	if _, isHTTP := r.DBClient.(*HTTPPuppetDBClient); !isHTTP {
-		return r.DBClient
-	}
-	caSecName := cluster.Status.CASecretName
-	if caSecName == "" {
-		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
-	}
-	caSec := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecName}, caSec); err == nil {
-		if httpClient, err := NewMTLSHTTPClient(caSec.Data["ca.crt"], caSec.Data["tls.crt"], caSec.Data["tls.key"]); err == nil {
-			return NewHTTPPuppetDBClient(httpClient)
-		}
-	}
-	return r.DBClient
-}
-
-func caEndpoint(cluster *openvoxv1alpha1.VoxCluster) string {
-	if cluster.Status.CAURL != "" {
-		return cluster.Status.CAURL
-	}
-	return cluster.Status.ServerURL
-}
-
-func (r *VoxNodeReconciler) decommissionNode(ctx context.Context, node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) error {
+// decommissionNode cleans the certificate on the CA, deactivates the node in OpenVox DB and deletes its
+// cert-manager Certificates. CA/DB failures are logged and do not block local cleanup.
+func (r *VoxNodeReconciler) decommissionNode(ctx context.Context, node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) {
 	logger := log.FromContext(ctx)
-	// 1. Revoke and clean node certificate from OpenVox CA (PUT /puppet-ca/v1/clean)
-	if caClient := r.caClientForCluster(ctx, cluster); caClient != nil {
-		if err := caClient.CleanNode(ctx, caEndpoint(cluster), node.Spec.Certname); err != nil {
-			logger.Info("OpenVox CA not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
+	if caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster); caClient != nil && cluster.Status.CAURL != "" {
+		if err := caClient.CleanNode(ctx, cluster.Status.CAURL, node.Spec.Certname); err != nil {
+			logger.Info("CA not reachable during decommission; proceeding", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}
-	// 2. Deactivate node in OpenVox DB / PuppetDB (POST /pdb/cmd/v1 -> deactivate node)
-	if dbClient := r.dbClientForCluster(ctx, cluster); dbClient != nil {
+	if dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster); dbClient != nil && cluster.Status.DatabaseURL != "" {
 		if err := dbClient.DeactivateNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname); err != nil {
-			logger.Info("OpenVox DB not reachable during decommission; proceeding with local resource cleanup", "certname", node.Spec.Certname, "reason", err.Error())
+			logger.Info("OpenVox DB not reachable during decommission; proceeding", "certname", node.Spec.Certname, "reason", err.Error())
 		}
 	}
-	// 3. Delete any cert-manager Certificates owned by this node
 	for _, certReq := range node.Spec.Certificates {
 		certObj := &unstructured.Unstructured{}
-		certObj.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "cert-manager.io",
-			Version: "v1",
-			Kind:    "Certificate",
-		})
+		certObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
 		certObj.SetNamespace(node.Namespace)
 		certObj.SetName(CertManagerSecretName(node, certReq))
 		_ = r.Delete(ctx, certObj)
 	}
-	return nil
 }
 
 func (r *VoxNodeReconciler) reconcileCertManagerCertificates(ctx context.Context, node *openvoxv1alpha1.VoxNode) (int32, error) {
 	var readyCount int32
 	for _, req := range node.Spec.Certificates {
 		secName := CertManagerSecretName(node, req)
-		issuerKind := req.IssuerRef.Kind
-		if issuerKind == "" {
-			issuerKind = "ClusterIssuer"
-		}
-		issuerGroup := req.IssuerRef.Group
-		if issuerGroup == "" {
-			issuerGroup = "cert-manager.io"
-		}
+		issuerKind := firstNonEmpty(req.IssuerRef.Kind, "ClusterIssuer")
+		issuerGroup := firstNonEmpty(req.IssuerRef.Group, "cert-manager.io")
 
 		certObj := &unstructured.Unstructured{}
-		certObj.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "cert-manager.io",
-			Version: "v1",
-			Kind:    "Certificate",
-		})
+		certObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
 		certObj.SetName(secName)
 		certObj.SetNamespace(node.Namespace)
 		certObj.SetLabels(map[string]string{
 			"app.kubernetes.io/name":       "voxkube",
 			"app.kubernetes.io/managed-by": "voxkube-operator",
-			"voxkube.io/node":              node.Spec.Certname,
-			"voxkube.io/cert-name":         req.Name,
+			"voxkube.io/node":              sanitizeLabelValue(node.Spec.Certname),
+			"voxkube.io/cert-name":         sanitizeLabelValue(req.Name),
 		})
 
 		spec := map[string]interface{}{
@@ -347,21 +343,13 @@ func (r *VoxNodeReconciler) reconcileCertManagerCertificates(ctx context.Context
 				"group": issuerGroup,
 			},
 		}
-		if len(req.DNSNames) > 0 {
-			dnsSlice := make([]interface{}, len(req.DNSNames))
-			for i, d := range req.DNSNames {
-				dnsSlice[i] = d
-			}
-			spec["dnsNames"] = dnsSlice
-		} else {
-			spec["dnsNames"] = []interface{}{node.Spec.Certname}
+		dnsNames := req.DNSNames
+		if len(dnsNames) == 0 {
+			dnsNames = []string{node.Spec.Certname}
 		}
+		spec["dnsNames"] = toInterfaceSlice(dnsNames)
 		if len(req.IPAddresses) > 0 {
-			ipSlice := make([]interface{}, len(req.IPAddresses))
-			for i, ip := range req.IPAddresses {
-				ipSlice[i] = ip
-			}
-			spec["ipAddresses"] = ipSlice
+			spec["ipAddresses"] = toInterfaceSlice(req.IPAddresses)
 		}
 		if req.Duration != "" {
 			spec["duration"] = req.Duration
@@ -375,22 +363,23 @@ func (r *VoxNodeReconciler) reconcileCertManagerCertificates(ctx context.Context
 			return readyCount, err
 		}
 
-		// Create or update unstructured cert-manager Certificate if CRD is installed
 		existing := &unstructured.Unstructured{}
 		existing.SetGroupVersionKind(certObj.GroupVersionKind())
 		err := r.Get(ctx, types.NamespacedName{Namespace: node.Namespace, Name: secName}, existing)
-		if apierrors.IsNotFound(err) {
-			if createErr := r.Create(ctx, certObj); createErr != nil {
-				if !meta.IsNoMatchError(createErr) && !strings.Contains(createErr.Error(), "no matches for kind \"Certificate\"") {
-					return readyCount, createErr
-				}
+		switch {
+		case apierrors.IsNotFound(err):
+			if createErr := r.Create(ctx, certObj); createErr != nil && !isNoMatch(createErr, "Certificate") {
+				return readyCount, createErr
 			}
-		} else if err == nil {
+		case err == nil:
 			certObj.SetResourceVersion(existing.GetResourceVersion())
-			_ = r.Update(ctx, certObj)
+			if err := r.Update(ctx, certObj); err != nil {
+				return readyCount, err
+			}
+		case !isNoMatch(err, "Certificate"):
+			return readyCount, err
 		}
 
-		// Check if corresponding TLS Secret exists and has tls.crt + tls.key
 		tlsSec := &corev1.Secret{}
 		if err := r.Get(ctx, types.NamespacedName{Namespace: node.Namespace, Name: secName}, tlsSec); err == nil {
 			if len(tlsSec.Data["tls.crt"]) > 0 && len(tlsSec.Data["tls.key"]) > 0 {
@@ -401,61 +390,88 @@ func (r *VoxNodeReconciler) reconcileCertManagerCertificates(ctx context.Context
 	return readyCount, nil
 }
 
-func (r *VoxNodeReconciler) refreshClusterHieraAndENC(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) error {
-	clusterRec := &VoxClusterReconciler{
-		Client: r.Client,
-		Scheme: r.Scheme,
+func isNoMatch(err error, kind string) bool {
+	return meta.IsNoMatchError(err) || strings.Contains(err.Error(), fmt.Sprintf("no matches for kind %q", kind))
+}
+
+func toInterfaceSlice(in []string) []interface{} {
+	out := make([]interface{}, len(in))
+	for i, s := range in {
+		out[i] = s
 	}
+	return out
+}
+
+// sanitizeLabelValue makes s a valid label value (<= 63 chars, alphanumerics plus -_.).
+func sanitizeLabelValue(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
+			b[i] = '-'
+		}
+	}
+	out := strings.Trim(string(b), "-_.")
+	if len(out) > 63 {
+		out = strings.Trim(out[:63], "-_.")
+	}
+	return out
+}
+
+func (r *VoxNodeReconciler) refreshClusterHieraAndENC(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) error {
+	clusterRec := &VoxClusterReconciler{Client: r.Client, Scheme: r.Scheme}
 	if _, err := clusterRec.reconcileHieraBridge(ctx, cluster); err != nil {
 		return err
 	}
 	return clusterRec.reconcileENCConfigMap(ctx, cluster)
 }
 
-// RenderVoxNodeENCYAML renders the standard Puppet ENC YAML classification for a VoxNode.
-func RenderVoxNodeENCYAML(node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) ([]byte, error) {
-	env := node.Spec.Classification.Environment
-	if env == "" {
-		if cluster != nil && cluster.Spec.Workflows.NodeClassification != nil && cluster.Spec.Workflows.NodeClassification.DefaultEnvironment != "" {
-			env = cluster.Spec.Workflows.NodeClassification.DefaultEnvironment
-		} else {
-			env = "production"
-		}
-	}
-
-	params := make(map[string]interface{})
-	if node.Spec.Classification.Role != "" {
-		params["role"] = node.Spec.Classification.Role
-	}
-	if cluster != nil {
-		params["voxkube_cluster"] = cluster.Name
-		if cluster.Spec.Workflows.Maintenance != nil && cluster.Spec.Workflows.Maintenance.GlobalNoop {
-			params["noop"] = true
-		}
-	}
-
-	for k, rawJSON := range node.Spec.Classification.Parameters {
-		if len(rawJSON.Raw) == 0 {
-			continue
-		}
-		var val interface{}
-		if err := json.Unmarshal(rawJSON.Raw, &val); err != nil {
-			return nil, fmt.Errorf("unmarshaling ENC parameter %q: %w", k, err)
-		}
-		params[k] = val
-	}
-
-	encDoc := map[string]interface{}{
-		"environment": env,
-		"classes":     node.Spec.Classification.Classes,
-		"parameters":  params,
-	}
-	return yaml.Marshal(encDoc)
-}
-
 // SetupWithManager registers VoxNodeReconciler with the controller manager.
 func (r *VoxNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&openvoxv1alpha1.VoxNode{}).
+		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.nodesForCluster)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.nodesForSecret)).
 		Complete(r)
+}
+
+// nodesForCluster enqueues every VoxNode that references the changed VoxCluster (e.g. when its CA becomes ready).
+func (r *VoxNodeReconciler) nodesForCluster(ctx context.Context, obj client.Object) []reconcile.Request {
+	nodes := &openvoxv1alpha1.VoxNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for _, n := range nodes.Items {
+		if n.Spec.ClusterRef == obj.GetName() {
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: n.Namespace, Name: n.Name}})
+		}
+	}
+	return reqs
+}
+
+// nodesForSecret enqueues VoxNodes whose certificate or secret references match the changed Secret.
+func (r *VoxNodeReconciler) nodesForSecret(ctx context.Context, obj client.Object) []reconcile.Request {
+	nodes := &openvoxv1alpha1.VoxNodeList{}
+	if err := r.List(ctx, nodes, client.InNamespace(obj.GetNamespace())); err != nil {
+		return nil
+	}
+	var reqs []reconcile.Request
+	for i := range nodes.Items {
+		n := &nodes.Items[i]
+		match := false
+		for _, c := range n.Spec.Certificates {
+			if CertManagerSecretName(n, c) == obj.GetName() {
+				match = true
+			}
+		}
+		for _, s := range n.Spec.Secrets {
+			if s.SecretName == obj.GetName() {
+				match = true
+			}
+		}
+		if match {
+			reqs = append(reqs, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: n.Namespace, Name: n.Name}})
+		}
+	}
+	return reqs
 }

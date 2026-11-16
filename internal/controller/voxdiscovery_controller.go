@@ -88,14 +88,16 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	// 2. Query OpenVox DB (PuppetDB) for active nodes matching selector
 	var activeNodes []DiscoveredPuppetNode
-	if dbClient := r.dbClientForCluster(ctx, cluster); dbClient != nil {
+	queryErr := ""
+	if dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster); dbClient != nil {
 		dbURL := cluster.Status.DatabaseURL
 		if dbURL == "" {
-			dbURL = fmt.Sprintf("https://%s-db.%s.svc.cluster.local:8081", cluster.Name, cluster.Namespace)
+			dbURL = dbServiceURL(cluster)
 		}
 		nodes, err := dbClient.QueryActiveNodes(ctx, dbURL, disc.Spec.Selector)
 		if err != nil {
-			logger.Info("PuppetDB inventory not yet reachable; reconciling empty EndpointSlice and requeuing", "dbURL", dbURL, "reason", err.Error())
+			logger.Info("OpenVox DB query failed; keeping EndpointSlices as they are and requeuing", "dbURL", dbURL, "reason", err.Error())
+			queryErr = err.Error()
 		} else {
 			activeNodes = nodes
 		}
@@ -113,7 +115,27 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 	}
 
-	// 3. Reconcile chunked EndpointSlices (<= 100 endpoints per slice)
+	syncInterval := 60 * time.Second
+	if disc.Spec.SyncInterval != "" {
+		if d, err := time.ParseDuration(disc.Spec.SyncInterval); err == nil && d > 0 {
+			syncInterval = d
+		}
+	}
+
+	// A failed query must not wipe the targets Prometheus is scraping: keep the last good slices.
+	if queryErr != "" {
+		meta.SetStatusCondition(&disc.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: disc.Generation,
+			Reason:             "QueryFailed",
+			Message:            queryErr,
+		})
+		_ = r.Status().Update(ctx, disc)
+		return ctrl.Result{RequeueAfter: syncInterval}, nil
+	}
+
+	// 3. Reconcile chunked EndpointSlices (<= 100 endpoints per slice, one set per IP family)
 	discoveredCount, sliceCount, err := r.reconcileEndpointSlices(ctx, disc, svcName, activeNodes, decommissionedSet)
 	if err != nil {
 		logger.Error(err, "failed to reconcile EndpointSlices")
@@ -156,34 +178,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}); err != nil {
 		return ctrl.Result{}, err
 	}
-
-	syncInterval := 60 * time.Second
-	if disc.Spec.SyncInterval != "" {
-		if d, err := time.ParseDuration(disc.Spec.SyncInterval); err == nil && d > 0 {
-			syncInterval = d
-		}
-	}
 	return ctrl.Result{RequeueAfter: syncInterval}, nil
-}
-
-func (r *VoxDiscoveryReconciler) dbClientForCluster(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) OpenVoxDBClient {
-	if r.DBClient == nil {
-		return nil
-	}
-	if _, isHTTP := r.DBClient.(*HTTPPuppetDBClient); !isHTTP {
-		return r.DBClient
-	}
-	caSecName := cluster.Status.CASecretName
-	if caSecName == "" {
-		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
-	}
-	caSec := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecName}, caSec); err == nil {
-		if httpClient, err := NewMTLSHTTPClient(caSec.Data["ca.crt"], caSec.Data["tls.crt"], caSec.Data["tls.key"]); err == nil {
-			return NewHTTPPuppetDBClient(httpClient)
-		}
-	}
-	return r.DBClient
 }
 
 func (r *VoxDiscoveryReconciler) reconcileHeadlessService(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) (string, error) {
@@ -252,30 +247,29 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		return nodes[i].Certname < nodes[j].Certname
 	})
 
-	var endpoints []discoveryv1.Endpoint
-	ready := true
+	var endpointsV4, endpointsV6 []discoveryv1.Endpoint
 	for _, n := range nodes {
 		if decommissionedSet[n.Certname] {
 			continue
 		}
-		ipStr := LookupFactString(n.Facts, addrFact)
-		if ipStr == "" {
-			continue
-		}
-		if net.ParseIP(ipStr) == nil {
+		ip := net.ParseIP(LookupFactString(n.Facts, addrFact))
+		if ip == nil {
 			continue
 		}
 
 		hostname := sanitizeDNSLabel(n.Certname)
 		nodeName := n.Certname
-		endpoints = append(endpoints, discoveryv1.Endpoint{
-			Addresses: []string{ipStr},
-			Hostname:  &hostname,
-			NodeName:  &nodeName,
-			Conditions: discoveryv1.EndpointConditions{
-				Ready: &ready,
-			},
-		})
+		ep := discoveryv1.Endpoint{
+			Addresses:  []string{ip.String()},
+			Hostname:   &hostname,
+			NodeName:   &nodeName,
+			Conditions: discoveryv1.EndpointConditions{Ready: new(true)},
+		}
+		if ip.To4() != nil {
+			endpointsV4 = append(endpointsV4, ep)
+		} else {
+			endpointsV6 = append(endpointsV6, ep)
+		}
 	}
 
 	var slicePorts []discoveryv1.EndpointPort
@@ -293,23 +287,33 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		})
 	}
 
-	// Chunk into slices of <= MaxEndpointsPerSlice (100)
-	var chunks [][]discoveryv1.Endpoint
-	for i := 0; i < len(endpoints); i += MaxEndpointsPerSlice {
-		end := i + MaxEndpointsPerSlice
-		if end > len(endpoints) {
-			end = len(endpoints)
-		}
-		chunks = append(chunks, endpoints[i:end])
+	type sliceSpec struct {
+		name      string
+		family    discoveryv1.AddressType
+		endpoints []discoveryv1.Endpoint
 	}
-	if len(chunks) == 0 {
-		// Create 1 empty EndpointSlice so the headless Service has a valid slice
-		chunks = [][]discoveryv1.Endpoint{{}}
+	chunk := func(eps []discoveryv1.Endpoint, prefix string, family discoveryv1.AddressType) []sliceSpec {
+		var out []sliceSpec
+		for i, idx := 0, 0; i < len(eps); i, idx = i+MaxEndpointsPerSlice, idx+1 {
+			end := i + MaxEndpointsPerSlice
+			if end > len(eps) {
+				end = len(eps)
+			}
+			out = append(out, sliceSpec{name: fmt.Sprintf("%s%d", prefix, idx), family: family, endpoints: eps[i:end]})
+		}
+		return out
+	}
+	// IPv4 slices keep the historical "<svc>-<n>" names; IPv6 slices are "<svc>-v6-<n>".
+	slices := chunk(endpointsV4, svcName+"-", discoveryv1.AddressTypeIPv4)
+	slices = append(slices, chunk(endpointsV6, svcName+"-v6-", discoveryv1.AddressTypeIPv6)...)
+	if len(slices) == 0 {
+		// Keep one empty EndpointSlice so the headless Service has a valid slice.
+		slices = []sliceSpec{{name: svcName + "-0", family: discoveryv1.AddressTypeIPv4}}
 	}
 
 	desiredSliceNames := make(map[string]bool)
-	for idx, chunk := range chunks {
-		sliceName := fmt.Sprintf("%s-%d", svcName, idx)
+	for _, sl := range slices {
+		sliceName := sl.name
 		desiredSliceNames[sliceName] = true
 
 		labels := voxDiscoveryLabels(disc.Name)
@@ -322,8 +326,8 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 				Namespace: disc.Namespace,
 				Labels:    labels,
 			},
-			AddressType: discoveryv1.AddressTypeIPv4,
-			Endpoints:   chunk,
+			AddressType: sl.family,
+			Endpoints:   sl.endpoints,
 			Ports:       slicePorts,
 		}
 		if err := controllerutil.SetControllerReference(disc, slice, r.Scheme); err != nil {
@@ -337,6 +341,16 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 				return 0, 0, err
 			}
 		} else if getErr == nil {
+			if existing.AddressType != sl.family {
+				// addressType is immutable; recreate the slice.
+				if err := r.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
+					return 0, 0, err
+				}
+				if err := r.Create(ctx, slice); err != nil {
+					return 0, 0, err
+				}
+				continue
+			}
 			existing.Endpoints = slice.Endpoints
 			existing.Ports = slice.Ports
 			existing.Labels = slice.Labels
@@ -361,7 +375,7 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		}
 	}
 
-	return int32(len(endpoints)), int32(len(chunks)), nil
+	return int32(len(endpointsV4) + len(endpointsV6)), int32(len(slices)), nil
 }
 
 func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
@@ -488,27 +502,34 @@ func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(
 	cluster *openvoxv1alpha1.VoxCluster,
 ) (string, error) {
 	secName := fmt.Sprintf("%s-prometheus-scraper-tls", disc.Name)
-	existing := &corev1.Secret{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: secName}, existing); err == nil {
-		return secName, nil
-	}
 
-	caSecName := cluster.Status.CASecretName
-	if caSecName == "" {
-		caSecName = fmt.Sprintf("%s-ca-tls", cluster.Name)
-	}
+	caSecName := caSecretName(cluster)
 	caSec := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: caSecName}, caSec); err != nil {
 		return "", err
 	}
-
 	caCert := caSec.Data["ca.crt"]
 	caKey := caSec.Data["ca.key"]
 	if len(caCert) == 0 || len(caKey) == 0 {
 		return "", fmt.Errorf("CA Secret %s is missing ca.crt or ca.key", caSecName)
 	}
 
-	clientCert, clientKey, err := IssueClientCertificate(caCert, caKey, "prometheus-scraper", []string{"prometheus-scraper"}, 365*24*time.Hour)
+	existing := &corev1.Secret{}
+	existingErr := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: secName}, existing)
+	if existingErr == nil {
+		if renew, _ := LeafNeedsRenewal(existing.Data["tls.crt"], caCert, nil, leafRenewBefore); !renew {
+			return secName, nil
+		}
+	} else if !apierrors.IsNotFound(existingErr) {
+		return "", existingErr
+	}
+
+	// The scraper certificate deliberately has no pp_cli_auth extension: it must not be able to use the CA admin API.
+	clientCert, clientKey, err := IssueLeafCertificate(caCert, caKey, LeafCertOptions{
+		CommonName: "prometheus-scraper",
+		DNSNames:   []string{"prometheus-scraper"},
+		Duration:   365 * 24 * time.Hour,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -528,6 +549,13 @@ func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(
 	}
 	if err := controllerutil.SetControllerReference(disc, sec, r.Scheme); err != nil {
 		return "", err
+	}
+	if existingErr == nil {
+		existing.Data = sec.Data
+		if err := r.Update(ctx, existing); err != nil {
+			return "", err
+		}
+		return secName, nil
 	}
 	if err := r.Create(ctx, sec); err != nil {
 		return "", err

@@ -98,8 +98,8 @@ spec:
                 description: Selector filters which active nodes in PuppetDB are exported.
                 properties:
                   classes:
-                    description: Classes filters nodes that have all specified Puppet
-                      classes in their catalog.
+                    description: Classes filters nodes whose last catalog contains
+                      all of these classes (e.g. "profile::node_exporter").
                     items:
                       type: string
                     type: array
@@ -114,8 +114,9 @@ spec:
                       (e.g., {"kernel": "Linux"}).'
                     type: object
                   pql:
-                    description: PQL is an optional raw Puppet Query Language query
-                      for advanced node selection.
+                    description: |-
+                      PQL is an additional Puppet Query Language filter expression ANDed into the inventory query,
+                      e.g. `facts.os.family = "RedHat"`. Write only the expression that goes inside inventory[...] { }.
                     type: string
                 type: object
               serviceMonitor:
