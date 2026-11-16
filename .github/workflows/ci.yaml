@@ -175,9 +175,16 @@ jobs:
           helm push dist/voxkube-operator-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"
           cat config/crd/bases/*.yaml > dist/voxkube-crds.yaml
 
-      - name: Create GitHub Release
+      # Works both for tags pushed from the CLI (creates the release) and for releases created in the
+      # GitHub UI, which create the tag themselves (attaches the assets to the existing release).
+      - name: Create GitHub Release or attach assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/voxkube-operator-*.tgz dist/voxkube-crds.yaml \
-            --title "VoxKube $GITHUB_REF_NAME" --generate-notes --verify-tag
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists (created in the UI); attaching assets"
+            gh release upload "$GITHUB_REF_NAME" dist/voxkube-operator-*.tgz dist/voxkube-crds.yaml --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/voxkube-operator-*.tgz dist/voxkube-crds.yaml \
+              --title "VoxKube $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi

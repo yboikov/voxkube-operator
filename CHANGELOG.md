@@ -8,11 +8,6 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
-### Fixed
-- `VoxDiscovery` no longer polls a non-existent OpenVox DB when the `VoxCluster` has `database.enabled: false`.
-  It removes its Service, EndpointSlices and ServiceMonitor, reports `Ready=False` (`DatabaseDisabled`), and
-  resumes automatically when the database is enabled.
-
 ## [0.1.0]: first release
 
 ### Added
@@ -27,7 +22,9 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   image volume, or a demo environment.
 - Honest status phases and conditions on all resources.
 - Pinned OpenVox Server and OpenVoxDB **8.18.0** images, with Renovate-driven updates.
-- Versioned operator builds (`--version`, startup log), release pipeline (images, OCI Helm chart, GitHub Release).
+- Versioned operator builds (`--version`, startup log), release pipeline (images, OCI Helm chart, GitHub Release),
+  usable from the GitHub UI or by pushing a tag.
+- `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
 [Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/yboikov/voxkube-operator/releases/tag/v0.1.0
