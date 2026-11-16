@@ -1,14 +1,20 @@
 # Stage 1: Install OpenVox DB from official Vox Pupuli RPM repository
 FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
+# Pinned version. Bump it together with internal/controller/versions.go and the chart (Renovate does this).
+ARG OPENVOXDB_VERSION=8.18.0
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
-    dnf install -y --setopt=install_weak_deps=False openvoxdb && \
+    dnf install -y --setopt=install_weak_deps=False "openvoxdb-${OPENVOXDB_VERSION}" && \
+    rpm -q openvoxdb | tee /openvox-packages.txt && \
+    rpm -q --qf '%{VERSION}' openvoxdb | grep -qx "${OPENVOXDB_VERSION}" && \
     dnf clean all
 
 # Stage 2: Rootless OpenShift restricted-v2 runtime image
 FROM registry.access.redhat.com/ubi9/ubi:latest
 ARG JDK_VERSION=21
 
+ARG OPENVOXDB_VERSION=8.18.0
 LABEL org.opencontainers.image.title="VoxKube OpenVox DB" \
+      org.opencontainers.image.version="${OPENVOXDB_VERSION}" \
       org.opencontainers.image.description="Rootless OpenVox DB (PuppetDB) for Kubernetes and OpenShift" \
       org.opencontainers.image.vendor="yboikov" \
       org.opencontainers.image.url="https://github.com/yboikov/voxkube-operator" \
@@ -32,6 +38,7 @@ COPY --from=rpm-installer /opt/puppetlabs /opt/puppetlabs
 COPY --from=rpm-installer /etc/puppetlabs /etc/puppetlabs
 COPY --from=rpm-installer /var/log/puppetlabs /var/log/puppetlabs
 COPY --from=rpm-installer /var/run/puppetlabs /var/run/puppetlabs
+COPY --from=rpm-installer /openvox-packages.txt /usr/share/voxkube/openvox-packages.txt
 
 COPY images/openvox-db/entrypoint.sh /entrypoint.sh
 

@@ -440,7 +440,7 @@ func serverImage(cluster *openvoxv1alpha1.VoxCluster) string {
 	if cluster.Spec.Server.Image != "" {
 		return cluster.Spec.Server.Image
 	}
-	return "ghcr.io/yboikov/openvox-server:latest"
+	return DefaultOpenVoxServerImage
 }
 
 func puppetserverConfig(maxActive int32) string {

@@ -30,9 +30,9 @@ Running Puppet / OpenVox inside Kubernetes or OpenShift traditionally hits four 
    - All workloads (`voxkube-operator`, `openvox-server`, `openvox-db`, `postgresql`) run rootless without hardcoded UIDs/GIDs, allowing OpenShift to assign arbitrary namespace UIDs cleanly.
 4. **First-Party Multi-Arch Container Images (`linux/amd64` & `linux/arm64`)**:
    - Built directly from official Vox Pupuli OpenVox 8 packages (`yum.voxpupuli.org`) on Red Hat UBI 9 via GitHub Actions:
-     - `ghcr.io/yboikov/voxkube-operator:latest`
-     - `ghcr.io/yboikov/openvox-server:latest`
-     - `ghcr.io/yboikov/openvox-db:latest`
+     - `ghcr.io/yboikov/voxkube-operator:<git sha>` (and `latest`)
+     - `ghcr.io/yboikov/openvox-server:8.18.0` / `ghcr.io/yboikov/openvox-db:8.18.0`
+   - OpenVox versions are **pinned** (see [Image versions](#image-versions)), never "whatever the repo has today".
 
 ---
 
@@ -97,12 +97,12 @@ spec:
   ca:
     storageSize: 2Gi
   server:
-    image: ghcr.io/yboikov/openvox-server:latest
+    image: ghcr.io/yboikov/openvox-server:8.18.0
     replicas: 2
     javaArgs: "-Xms512m -Xmx512m"
   database:
     enabled: true
-    image: ghcr.io/yboikov/openvox-db:latest
+    image: ghcr.io/yboikov/openvox-db:8.18.0
     postgres:
       mode: builtin # ephemeral, dev/demo only; use mode: external (e.g. CloudNativePG) in production
   networking:
@@ -363,7 +363,7 @@ The operator mints an installation token (`POST {apiBaseURL}/app/installations/{
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `image` | string | `ghcr.io/yboikov/openvox-server:latest` | – | Used by the compilers, the g10k containers **and the CA StatefulSet**. |
+| `image` | string | the operator's pinned OpenVox Server image | – | Used by the compilers, the g10k containers **and the CA StatefulSet**. See [Image versions](#image-versions). |
 | `imagePullPolicy` | string | `IfNotPresent` | `Always` \| `IfNotPresent` \| `Never` | Applied to every container that uses `image`. |
 | `replicas` | int32 | `2` | ≥ 1 | Compiler replicas. Ignored while `autoscaling.enabled` (the HPA owns the count). |
 | `javaArgs` | string | `-Xms1g -Xmx1g` | – | `JAVA_ARGS` for compilers. The CA pod always uses `-Xms256m -Xmx384m`. |
@@ -398,7 +398,7 @@ Defaults (with no override): `runAsNonRoot: true`, `seccompProfile: RuntimeDefau
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `enabled` | bool | `true` | – | `false` skips PostgreSQL and OpenVox DB, and compilers don't use PuppetDB (`reports` defaults to `store`). |
-| `image` | string | `ghcr.io/yboikov/openvox-db:latest` | – | OpenVox DB image. |
+| `image` | string | the operator's pinned OpenVox DB image | – | OpenVox DB image. See [Image versions](#image-versions). |
 | `replicas` | int32 | `1` | ≥ 1 | Replicas of Deployment `<cluster>-db`. |
 | `postgres` | [`ClusterPostgresSpec`](#voxclusterspecdatabasepostgres) | – | – | Database backend. |
 | `housekeeping` | [`DatabaseHousekeepingSpec`](#voxclusterspecdatabasehousekeeping) | – | – | Written to `database.ini`. |
@@ -774,6 +774,29 @@ All CA and DB calls use mTLS with `ca.crt`, `tls.crt` and `tls.key` from `<clust
 | `--watch-namespace` | – (all) | Restrict the operator to one namespace. |
 
 Standard controller-runtime `--zap-*` logging flags are also accepted.
+
+### Image versions
+
+The OpenVox packages inside the images are pinned to exact versions:
+
+| Where | What |
+|---|---|
+| `images/openvox-server/Containerfile` | `ARG OPENVOX_SERVER_VERSION`, `ARG OPENVOXDB_VERSION` (for `openvoxdb-termini`) |
+| `images/openvox-db/Containerfile` | `ARG OPENVOXDB_VERSION` |
+| `internal/controller/versions.go` | Defaults used when `spec.server.image` / `spec.database.image` are empty |
+| `charts/voxkube-operator/values.yaml` | `cluster.server.image`, `cluster.database.image` |
+
+The build fails if the installed version differs from the pin. The installed package list is in `/usr/share/voxkube/openvox-packages.txt` inside each image, and in the `org.opencontainers.image.version` label.
+
+Tags pushed from `main` for each OpenVox image:
+
+| Tag | Example | Mutable? |
+|---|---|---|
+| `<version>` | `8.18.0` | Moves when the image is rebuilt (e.g. base image updates) for the same OpenVox version. |
+| `<version>-<sha>` | `8.18.0-1a2b3c4` | **Immutable.** Use this, or a digest, for production GitOps. |
+| `<sha>`, `latest` | | `latest` follows `main`. |
+
+Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release appears, updating every location above. It never proposes 9.x, because the images use the `openvox8` repository. Keep the server and DB on the same version. Pull requests build the images (amd64, no push), so a bad pin fails before merge.
 
 ### Known limitations
 

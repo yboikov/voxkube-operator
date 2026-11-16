@@ -187,7 +187,7 @@ access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
 	dbDeployName := fmt.Sprintf("%s-db", cluster.Name)
 	dbImg := cluster.Spec.Database.Image
 	if dbImg == "" {
-		dbImg = "ghcr.io/yboikov/openvox-db:latest"
+		dbImg = DefaultOpenVoxDBImage
 	}
 	dbReplicas := int32(1)
 	if cluster.Spec.Database.Replicas != nil {

@@ -60,12 +60,13 @@ cluster:
       synchronizedRollout: true
       generateTypes: true
   server:
-    image: ghcr.io/yboikov/openvox-server:latest
+    # Pinned OpenVox Server version (immutable variant: 8.18.0-<git sha>). Keep in sync with the DB image.
+    image: ghcr.io/yboikov/openvox-server:8.18.0
     replicas: 2
     javaArgs: "-Xms1g -Xmx1g"
   database:
     enabled: true
-    image: ghcr.io/yboikov/openvox-db:latest
+    image: ghcr.io/yboikov/openvox-db:8.18.0
     postgres:
       # builtin = ephemeral single-pod PostgreSQL for dev/demo only.
       # For production use mode: external with a CloudNativePG (or other) cluster, e.g.
