@@ -6,10 +6,11 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go install github.com/voxpupul
     mkdir -p /out && \
     (cp /go/bin/g10k /out/g10k 2>/dev/null || cp /go/bin/linux_${TARGETARCH}/g10k /out/g10k)
 
-# Stage 2: Install OpenVox Server from official Vox Pupuli RPM repository
-FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
+# Stage 2: Install OpenVox Server (+ OpenVox DB termini) from the official Vox Pupuli RPM repository.
+# Built for the target platform: openvox-agent ships native Ruby binaries (used by `puppet generate types`).
+FROM registry.access.redhat.com/ubi9/ubi:latest AS rpm-installer
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
-    dnf install -y --setopt=install_weak_deps=False openvox-server && \
+    dnf install -y --setopt=install_weak_deps=False openvox-server openvoxdb-termini && \
     dnf clean all
 
 # Stage 3: Rootless OpenShift restricted-v2 runtime image
@@ -28,6 +29,7 @@ RUN dnf install -y --allowerasing --setopt=install_weak_deps=False \
         bash \
         curl \
         git \
+        openssh-clients \
         openssl \
         tar \
         gzip \
@@ -57,11 +59,7 @@ RUN printf '%s\n' \
     '  </appender>' \
     '  <appender-ref ref="STDOUT" />' \
     '</configuration>' > /etc/puppetlabs/puppetserver/request-logging.xml && \
-    printf '%s\n' \
-    '#!/bin/sh' \
-    'set -e' \
-    'while true; do /usr/local/bin/g10k "$@"; sleep 60; done' > /usr/local/bin/g10k-sidecar && \
-    chmod +x /entrypoint.sh /usr/local/bin/g10k /usr/local/bin/g10k-sidecar && \
+    chmod +x /entrypoint.sh /usr/local/bin/g10k && \
     mkdir -p /var/cache/puppetlabs ${HOME}/.puppetlabs/var && \
     ln -sf /etc/puppetlabs ${HOME}/.puppetlabs/etc && \
     ln -sf /opt/puppetlabs ${HOME}/.puppetlabs/opt && \

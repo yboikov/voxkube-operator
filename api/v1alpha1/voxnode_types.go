@@ -17,7 +17,9 @@ const (
 	NodeStateDecommissioned  VoxNodeState = "Decommissioned"
 )
 
-// VoxNodePhase describes the observed status phase of a VoxNode.
+// VoxNodePhase describes the observed status phase of a VoxNode:
+// PendingCSR (no CSR yet, or CSR awaiting approval), Signed (certificate signed, node not yet seen in OpenVox DB),
+// Active (signed and reporting), Revoked, Decommissioned, Error.
 // +kubebuilder:validation:Enum=PendingCSR;Signed;Active;Revoked;Decommissioned;Error
 type VoxNodePhase string
 
@@ -33,7 +35,8 @@ const (
 // NodeClassificationSpec configures Kubernetes-native ENC (External Node Classifier) data for a node.
 type NodeClassificationSpec struct {
 	// Environment is the Puppet environment assigned to this node (e.g., "production", "staging").
-	// +kubebuilder:default="production"
+	// When empty, the VoxCluster's spec.workflows.nodeClassification.defaultEnvironment is used ("production" by default).
+	// +optional
 	Environment string `json:"environment,omitempty"`
 
 	// Role is the high-level role assigned to this node (e.g., "webserver", "database").

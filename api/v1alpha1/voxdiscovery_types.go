@@ -16,11 +16,12 @@ type DiscoverySelectorSpec struct {
 	// +optional
 	Facts map[string]string `json:"facts,omitempty"`
 
-	// Classes filters nodes that have all specified Puppet classes in their catalog.
+	// Classes filters nodes whose last catalog contains all of these classes (e.g. "profile::node_exporter").
 	// +optional
 	Classes []string `json:"classes,omitempty"`
 
-	// PQL is an optional raw Puppet Query Language query for advanced node selection.
+	// PQL is an additional Puppet Query Language filter expression ANDed into the inventory query,
+	// e.g. `facts.os.family = "RedHat"`. Write only the expression that goes inside inventory[...] { }.
 	// +optional
 	PQL string `json:"pql,omitempty"`
 }

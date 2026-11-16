@@ -21,28 +21,32 @@ const (
 )
 
 // ClusterCodeSpec configures how Puppet environments and modules are deployed into the cluster.
+// When the selected mode has no source configured (mode "git" without git, "pvc" without claimName,
+// "imageVolume" without image) a small demo "production" environment is seeded instead.
 type ClusterCodeSpec struct {
 	// Mode selects the code deployment strategy.
 	// +kubebuilder:validation:Enum=git;pvc;imageVolume
 	// +kubebuilder:default="git"
 	Mode string `json:"mode,omitempty"`
 
-	// Git configures outbound-only central Git polling + synchronized g10k deployment.
+	// Git configures outbound-only Git polling and g10k deployment of the control-repo.
 	// +optional
 	Git *GitCodeSpec `json:"git,omitempty"`
 
-	// ClaimName is the PVC name when mode is "pvc".
+	// ClaimName is the PVC mounted read-only at /etc/puppetlabs/code when mode is "pvc".
+	// It must contain an environments/ directory. Use a ReadWriteMany or ReadOnlyMany PVC when replicas > 1.
 	// +optional
 	ClaimName string `json:"claimName,omitempty"`
 
-	// Image is the container image reference when mode is "imageVolume".
+	// Image is an OCI image mounted read-only at /etc/puppetlabs/code when mode is "imageVolume"
+	// (Kubernetes image volumes). It must contain an environments/ directory.
 	// +optional
 	Image string `json:"image,omitempty"`
 }
 
 // GitCodeSpec configures outbound-only Git synchronization via g10k.
 type GitCodeSpec struct {
-	// Remote is the Git repository URL for the Puppet control-repo.
+	// Remote is the Git repository URL for the Puppet control-repo. Every branch becomes a Puppet environment.
 	Remote string `json:"remote"`
 
 	// AuthType selects the Git authentication mechanism.
@@ -54,19 +58,25 @@ type GitCodeSpec struct {
 	// +optional
 	GitHubApp *GitHubAppAuthSpec `json:"githubApp,omitempty"`
 
-	// CredentialsSecretRef references a Secret with ssh-privatekey (sshKey) or token/username/password (httpsToken).
+	// CredentialsSecretRef names a Secret in the same namespace.
+	// For authType "sshKey" it must contain "ssh-privatekey" and may contain "known_hosts".
+	// For authType "httpsToken" it must contain either "token" (optionally with "username",
+	// default "x-access-token") or "username" and "password".
 	// +optional
 	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
 
-	// PollInterval is how often the operator polls the remote repository via git ls-remote.
+	// PollInterval is how often the remote is checked for new commits (Go duration, e.g. "60s", "5m").
 	// +kubebuilder:default="60s"
 	PollInterval string `json:"pollInterval,omitempty"`
 
-	// SynchronizedRollout ensures all compiler pods switch to new commits atomically.
+	// SynchronizedRollout makes code changes reach all compilers together: the operator polls the remote and
+	// performs a rolling restart of the compilers when any branch changes, so every pod serves the same revision.
+	// When false, every compiler runs a g10k sidecar that deploys independently every pollInterval.
+	// SSH remotes cannot be polled by the operator and always use the sidecar.
 	// +kubebuilder:default=true
 	SynchronizedRollout *bool `json:"synchronizedRollout,omitempty"`
 
-	// GenerateTypes runs puppet generate types per environment after g10k sync for environment isolation.
+	// GenerateTypes runs "puppet generate types" for every environment after each g10k deployment.
 	// +kubebuilder:default=true
 	GenerateTypes *bool `json:"generateTypes,omitempty"`
 }
@@ -103,16 +113,21 @@ type ClusterCASpec struct {
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
 
-	// TTL is the root CA certificate validity duration.
+	// TTL is the root CA certificate validity, applied when the CA is first generated.
+	// Accepts Go durations plus "d" (days) and "y" (365 days) suffixes, e.g. "10y", "3650d", "87600h".
 	// +kubebuilder:default="10y"
 	TTL string `json:"ttl,omitempty"`
 
-	// AutosignMode controls how incoming CSRs are signed.
+	// AutosignMode controls how incoming CSRs are signed:
+	// "voxnode" signs a CSR when a VoxNode for its certname is Active;
+	// "off" never signs automatically (VoxNode only reports certificate state);
+	// "true" makes the CA sign every CSR immediately;
+	// "psk" makes the CA sign CSRs whose challengePassword attribute matches the pre-shared key.
 	// +kubebuilder:validation:Enum=voxnode;psk;off;true
 	// +kubebuilder:default="voxnode"
 	AutosignMode string `json:"autosignMode,omitempty"`
 
-	// PSKSecretRef references a Secret containing a shared passphrase when autosignMode is "psk".
+	// PSKSecretRef names a Secret with key "psk" holding the pre-shared key when autosignMode is "psk".
 	// +optional
 	PSKSecretRef string `json:"pskSecretRef,omitempty"`
 }
@@ -225,13 +240,15 @@ type ClusterDatabaseSpec struct {
 }
 
 // ClusterPostgresSpec configures PostgreSQL for OpenVox DB.
+// Use mode "external" (CloudNativePG, RDS, Crunchy, ...) for production. Mode "builtin" runs a single
+// PostgreSQL pod on ephemeral storage and is meant for development and demos only.
 type ClusterPostgresSpec struct {
-	// Mode selects "external" (CNPG/RDS/Crunchy) or "builtin" (single-pod StatefulSet).
+	// Mode selects "external" (CNPG/RDS/Crunchy) or "builtin" (ephemeral single-pod StatefulSet, dev/demo only).
 	// +kubebuilder:validation:Enum=external;builtin
 	// +kubebuilder:default="builtin"
 	Mode string `json:"mode,omitempty"`
 
-	// Host is the external PostgreSQL hostname when mode is "external".
+	// Host is the external PostgreSQL hostname when mode is "external" (e.g. "<cnpg-cluster>-rw.<namespace>.svc").
 	// +optional
 	Host string `json:"host,omitempty"`
 
@@ -243,21 +260,20 @@ type ClusterPostgresSpec struct {
 	// +kubebuilder:default="openvoxdb"
 	DatabaseName string `json:"databaseName,omitempty"`
 
-	// CredentialsSecretRef references a Secret with username and password keys.
+	// CredentialsSecretRef names a Secret with "username" and "password" keys
+	// (a CloudNativePG "<cluster>-app" Secret works as-is). Required when mode is "external".
+	// When omitted in "builtin" mode the operator generates "<cluster>-postgres-credentials".
 	// +optional
 	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
 
-	// SSLMode is the PostgreSQL SSL connection mode.
+	// SSLMode is the PostgreSQL JDBC sslmode used when mode is "external". Ignored for "builtin" (no TLS).
+	// +kubebuilder:validation:Enum=disable;allow;prefer;require;verify-ca;verify-full
 	// +kubebuilder:default="require"
 	SSLMode string `json:"sslMode,omitempty"`
 
 	// Image is the PostgreSQL image when mode is "builtin".
 	// +kubebuilder:default="quay.io/sclorg/postgresql-16-c9s:latest"
 	Image string `json:"image,omitempty"`
-
-	// StorageSize is the PVC size when mode is "builtin".
-	// +kubebuilder:default="10Gi"
-	StorageSize string `json:"storageSize,omitempty"`
 }
 
 // DatabaseHousekeepingSpec configures PuppetDB database.ini TTL settings.
@@ -350,45 +366,52 @@ type ClusterWorkflowsSpec struct {
 
 // WorkflowNodeClassificationSpec configures ENC behavior.
 type WorkflowNodeClassificationSpec struct {
-	// Mode selects "voxnode" (classify from VoxNode CRs), "externalHttp", or "none".
+	// Mode selects the ENC: "voxnode" classifies from VoxNode resources; "externalHttp" uses the VoxNode
+	// classification when one exists and otherwise GETs "<externalURL>/<certname>" (which must return ENC YAML);
+	// "none" disables the ENC entirely (classification comes from your site.pp / Hiera only).
 	// +kubebuilder:validation:Enum=voxnode;externalHttp;none
 	// +kubebuilder:default="voxnode"
 	Mode string `json:"mode,omitempty"`
 
-	// DefaultEnvironment is the default Puppet environment when unspecified on a VoxNode.
+	// DefaultEnvironment is the Puppet environment returned for nodes without a VoxNode classification.
 	// +kubebuilder:default="production"
 	DefaultEnvironment string `json:"defaultEnvironment,omitempty"`
 
-	// AutoCreateVoxNode automatically creates a VoxNode CR when a new node checks in or submits a CSR.
+	// AutoCreateVoxNode makes the operator create a VoxNode for every certname the CA knows about that has none:
+	// pending CSRs get state PendingApproval, already-signed certificates get state Active.
 	// +kubebuilder:default=true
 	AutoCreateVoxNode *bool `json:"autoCreateVoxNode,omitempty"`
 
-	// ExternalURL is the optional fallback ENC URL when mode is "externalHttp".
+	// ExternalURL is the base URL of the fallback ENC when mode is "externalHttp".
 	// +optional
 	ExternalURL string `json:"externalURL,omitempty"`
 }
 
-// WorkflowFactsSpec configures trusted facts injection.
+// WorkflowFactsSpec configures Kubernetes metadata exposed to Puppet code.
 type WorkflowFactsSpec struct {
-	// InjectKubernetesMetadata injects cluster and environment metadata into node facts.
+	// InjectKubernetesMetadata adds the top-scope ENC parameters voxkube_cluster, voxkube_namespace and
+	// voxkube_node (the VoxNode name) to every node's classification.
 	// +kubebuilder:default=true
 	InjectKubernetesMetadata bool `json:"injectKubernetesMetadata,omitempty"`
 }
 
 // WorkflowReportsSpec configures Puppet report processors.
 type WorkflowReportsSpec struct {
-	// Processors is the list of enabled Puppet report processors.
+	// Processors is the list of Puppet report processors (puppet.conf "reports").
+	// Defaults to ["puppetdb"] when the database is enabled, otherwise ["store"].
 	// +optional
 	Processors []string `json:"processors,omitempty"`
 
-	// WebhookURL is an optional HTTP endpoint to forward Puppet run reports.
+	// WebhookURL enables Puppet's built-in "http" report processor and sends every report to this URL
+	// (puppet.conf "reporturl").
 	// +optional
 	WebhookURL string `json:"webhookURL,omitempty"`
 }
 
 // WorkflowMaintenanceSpec configures global No-Op mode.
 type WorkflowMaintenanceSpec struct {
-	// GlobalNoop forces all catalog compilations into noop mode during change freezes.
+	// GlobalNoop adds the top-scope ENC parameter "noop: true" to every classified node. Puppet does not act on
+	// this variable by itself: your code must honour it (for example with the noop() function from trlinkin/noop).
 	// +kubebuilder:default=false
 	GlobalNoop bool `json:"globalNoop,omitempty"`
 }
@@ -430,6 +453,10 @@ type VoxClusterStatus struct {
 	// +optional
 	Phase VoxClusterPhase `json:"phase,omitempty"`
 
+	// ObservedGeneration is the metadata.generation last processed by the operator.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// ServerURL is the external or cluster-internal URL where Puppet agents connect.
 	// +optional
 	ServerURL string `json:"serverURL,omitempty"`
@@ -450,7 +477,7 @@ type VoxClusterStatus struct {
 	// +optional
 	HieraSecretName string `json:"hieraSecretName,omitempty"`
 
-	// ObservedCommit is the latest Git commit SHA observed by the central Git poller.
+	// ObservedCommit is the HEAD commit SHA of the control-repo last observed by the operator's Git poller.
 	// +optional
 	ObservedCommit string `json:"observedCommit,omitempty"`
 

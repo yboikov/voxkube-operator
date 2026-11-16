@@ -8,19 +8,42 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
 
+// GitAuth carries HTTP basic credentials for polling (GitHub App and token auth use
+// username "x-access-token" and the token as password).
+type GitAuth struct {
+	Username string
+	Password string
+}
+
+// GitRevision is the result of polling a remote.
+type GitRevision struct {
+	// Head is the commit SHA of HEAD (the default branch).
+	Head string
+	// RefsHash is a stable hash over every refs/heads/* entry; it changes whenever any branch moves.
+	RefsHash string
+}
+
 // GitRemotePoller polls a remote Git repository (outbound-only) to detect new commits without inbound webhooks.
 type GitRemotePoller interface {
-	// ResolveHEAD returns the latest commit SHA on the remote repository.
-	ResolveHEAD(ctx context.Context, remoteURL, token string) (string, error)
+	// Resolve returns the current revision of the remote. Only http(s) remotes are supported.
+	Resolve(ctx context.Context, remoteURL string, auth *GitAuth) (GitRevision, error)
+}
+
+// IsHTTPRemote reports whether the operator can poll remoteURL itself.
+func IsHTTPRemote(remoteURL string) bool {
+	return strings.HasPrefix(remoteURL, "http://") || strings.HasPrefix(remoteURL, "https://")
 }
 
 // GitHubAppTokenExchanger mints short-lived GitHub App installation access tokens (ghs_...) using RS256 JWTs.
@@ -153,45 +176,86 @@ func NewSmartHTTPGitPoller(httpClient *http.Client) *SmartHTTPGitPoller {
 	return &SmartHTTPGitPoller{HTTPClient: httpClient}
 }
 
-// ResolveHEAD queries the Git Smart HTTP advertisement to read HEAD's commit SHA without cloning.
-func (p *SmartHTTPGitPoller) ResolveHEAD(ctx context.Context, remoteURL, token string) (string, error) {
-	if remoteURL == "" {
-		return "", nil
-	}
-	if !strings.HasPrefix(remoteURL, "http://") && !strings.HasPrefix(remoteURL, "https://") {
-		return "sha-ssh-head", nil
+// Resolve queries the Git Smart HTTP ref advertisement (the equivalent of git ls-remote) without cloning.
+func (p *SmartHTTPGitPoller) Resolve(ctx context.Context, remoteURL string, auth *GitAuth) (GitRevision, error) {
+	if !IsHTTPRemote(remoteURL) {
+		return GitRevision{}, fmt.Errorf("only http(s) remotes can be polled, got %q", remoteURL)
 	}
 	infoURL := strings.TrimRight(remoteURL, "/") + "/info/refs?service=git-upload-pack"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infoURL, nil)
 	if err != nil {
-		return "", err
+		return GitRevision{}, err
 	}
-	if token != "" {
-		req.SetBasicAuth("x-access-token", token)
+	req.Header.Set("Git-Protocol", "version=1")
+	if auth != nil && auth.Password != "" {
+		req.SetBasicAuth(auth.Username, auth.Password)
 	}
 	resp, err := p.HTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return GitRevision{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("git ls-remote HTTP %d from %s", resp.StatusCode, infoURL)
+		return GitRevision{}, fmt.Errorf("git ref advertisement returned HTTP %d from %s", resp.StatusCode, infoURL)
 	}
-	bodyBytes, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return "", err
+		return GitRevision{}, err
 	}
-	for _, line := range strings.Split(string(bodyBytes), "\n") {
+	return ParseRefAdvertisement(body)
+}
+
+// ParseRefAdvertisement parses a git-upload-pack smart HTTP ref advertisement (pkt-line format).
+func ParseRefAdvertisement(body []byte) (GitRevision, error) {
+	refs := map[string]string{}
+	for len(body) >= 4 {
+		n, err := strconv.ParseUint(string(body[:4]), 16, 16)
+		if err != nil {
+			return GitRevision{}, fmt.Errorf("malformed pkt-line length %q", string(body[:4]))
+		}
+		if n == 0 { // flush-pkt
+			body = body[4:]
+			continue
+		}
+		if int(n) > len(body) || n < 4 {
+			return GitRevision{}, fmt.Errorf("truncated pkt-line")
+		}
+		line := string(body[4:n])
+		body = body[n:]
+		line = strings.TrimRight(line, "\n")
+		if i := strings.IndexByte(line, 0); i >= 0 { // strip capabilities
+			line = line[:i]
+		}
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
 		fields := strings.Fields(line)
-		for i, f := range fields {
-			if (f == "HEAD" || strings.HasSuffix(f, "refs/heads/main") || strings.HasSuffix(f, "refs/heads/production")) && i > 0 {
-				sha := fields[i-1]
-				if len(sha) > 40 {
-					sha = sha[len(sha)-40:]
-				}
-				return sha, nil
+		if len(fields) != 2 || len(fields[0]) < 40 {
+			continue
+		}
+		refs[fields[1]] = fields[0]
+	}
+
+	var heads []string
+	for ref, sha := range refs {
+		if strings.HasPrefix(ref, "refs/heads/") {
+			heads = append(heads, ref+" "+sha)
+		}
+	}
+	if len(heads) == 0 && refs["HEAD"] == "" {
+		return GitRevision{}, fmt.Errorf("remote advertised no branches")
+	}
+	sort.Strings(heads)
+	sum := sha256.Sum256([]byte(strings.Join(heads, "\n")))
+
+	head := refs["HEAD"]
+	if head == "" {
+		for _, b := range []string{"refs/heads/main", "refs/heads/master", "refs/heads/production"} {
+			if refs[b] != "" {
+				head = refs[b]
+				break
 			}
 		}
 	}
-	return "sha-verified", nil
+	return GitRevision{Head: head, RefsHash: hex.EncodeToString(sum[:])[:16]}, nil
 }

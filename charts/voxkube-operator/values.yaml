@@ -67,8 +67,14 @@ cluster:
     enabled: true
     image: ghcr.io/yboikov/openvox-db:latest
     postgres:
+      # builtin = ephemeral single-pod PostgreSQL for dev/demo only.
+      # For production use mode: external with a CloudNativePG (or other) cluster, e.g.
+      #   host: openvoxdb-rw.openvox.svc, credentialsSecretRef: openvoxdb-app
       mode: builtin
-      storageSize: 10Gi
+      host: ""
+      databaseName: openvoxdb
+      credentialsSecretRef: ""
+      sslMode: require
     housekeeping:
       nodeTTL: 7d
       nodePurgeTTL: 14d

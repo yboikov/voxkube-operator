@@ -2,8 +2,11 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -119,12 +123,19 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 		t.Error("expected CA secret to contain ca.crt and tls.crt")
 	}
 
-	// 2. Verify OpenVox DB ConfigMap contains housekeeping TTLs (node-ttl, node-purge-ttl, report-ttl)
-	dbCM := &corev1.ConfigMap{}
-	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-db-config"}, dbCM); err != nil {
-		t.Fatalf("expected DB ConfigMap production-db-config: %v", err)
+	// 2. Verify database.ini (with credentials) lives in a Secret and carries the housekeeping TTLs
+	dbSec := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-db-database"}, dbSec); err != nil {
+		t.Fatalf("expected DB Secret production-db-database: %v", err)
 	}
-	dbIni := dbCM.Data["database.ini"]
+	dbIni := string(dbSec.Data["database.ini"])
+	pgCreds := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-postgres-credentials"}, pgCreds); err != nil {
+		t.Fatalf("expected generated built-in PostgreSQL credentials: %v", err)
+	}
+	if strings.Contains(dbIni, "password = openvoxdb\n") || !strings.Contains(dbIni, "password = "+string(pgCreds.Data["password"])) {
+		t.Errorf("expected database.ini to use the generated password, got:\n%s", dbIni)
+	}
 	for _, expected := range []string{"node-ttl = 7d", "node-purge-ttl = 14d", "report-ttl = 14d"} {
 		if !strings.Contains(dbIni, expected) {
 			t.Errorf("expected database.ini to contain %q, got:\n%s", expected, dbIni)
@@ -155,8 +166,71 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production"}, updated); err != nil {
 		t.Fatalf("failed to get updated VoxCluster: %v", err)
 	}
-	if updated.Status.Phase != openvoxv1alpha1.ClusterPhaseRunning {
-		t.Errorf("expected Phase=Running, got %s", updated.Status.Phase)
+	// Nothing is ready in the fake API server, so the phase must say so instead of claiming Running.
+	if updated.Status.Phase != openvoxv1alpha1.ClusterPhaseInitializingCA {
+		t.Errorf("expected Phase=InitializingCA while the CA is not ready, got %s", updated.Status.Phase)
+	}
+	if c := meta.FindStatusCondition(updated.Status.Conditions, ConditionReady); c == nil || c.Status != metav1.ConditionFalse {
+		t.Errorf("expected Ready=False, got %+v", c)
+	}
+	if c := meta.FindStatusCondition(updated.Status.Conditions, ConditionCodeReady); c == nil || c.Reason != codeReasonGit {
+		t.Errorf("expected CodeReady reason %s, got %+v", codeReasonGit, c)
+	}
+	if updated.Status.DatabaseURL != "https://production-db.openvox.svc.cluster.local:8081" {
+		t.Errorf("expected mTLS DatabaseURL, got %q", updated.Status.DatabaseURL)
+	}
+
+	// 5. CA material must survive VoxCluster deletion: no owner references on the CA Secret and PVC
+	if len(caSec.OwnerReferences) != 0 {
+		t.Errorf("expected CA Secret without owner references, got %v", caSec.OwnerReferences)
+	}
+	caPVC := &corev1.PersistentVolumeClaim{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-ca-data"}, caPVC); err != nil {
+		t.Fatalf("expected CA PVC: %v", err)
+	}
+	if len(caPVC.OwnerReferences) != 0 {
+		t.Errorf("expected CA PVC without owner references, got %v", caPVC.OwnerReferences)
+	}
+
+	// 6. Service certificate covers the compiler, CA and DB Services and the external hostname
+	block, _ := pem.Decode(caSec.Data["tls.crt"])
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"production-db.openvox.svc", "production-ca.openvox.svc.cluster.local", "puppet.apps.ocp.example.com"} {
+		if !slices.Contains(leaf.DNSNames, want) {
+			t.Errorf("expected service certificate SAN %q, got %v", want, leaf.DNSNames)
+		}
+	}
+
+	// 7. g10k configuration is rendered and compilers talk to OpenVox DB
+	g10kCM := &corev1.ConfigMap{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-g10k"}, g10kCM); err != nil {
+		t.Fatalf("expected g10k ConfigMap: %v", err)
+	}
+	if !strings.Contains(g10kCM.Data["g10k.yaml"], "remote: 'https://github.com/myorg/puppet-control-repo.git'") {
+		t.Errorf("unexpected g10k.yaml:\n%s", g10kCM.Data["g10k.yaml"])
+	}
+	srvCM := &corev1.ConfigMap{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-server-config"}, srvCM); err != nil {
+		t.Fatalf("expected server ConfigMap: %v", err)
+	}
+	for _, want := range []string{"[server]", "storeconfigs_backend = puppetdb", "reports = puppetdb", "external_nodes = /etc/puppetlabs/puppet/enc.sh"} {
+		if !strings.Contains(srvCM.Data["puppet.conf"], want) {
+			t.Errorf("expected puppet.conf to contain %q, got:\n%s", want, srvCM.Data["puppet.conf"])
+		}
+	}
+	if !strings.Contains(srvCM.Data["puppetdb.conf"], "server_urls = https://production-db.openvox.svc:8081") {
+		t.Errorf("unexpected puppetdb.conf: %s", srvCM.Data["puppetdb.conf"])
+	}
+	if srvDeploy.Spec.Template.Annotations[AnnotationCodeRevision] != "refs-1" {
+		t.Errorf("expected code-revision annotation refs-1, got %q", srvDeploy.Spec.Template.Annotations[AnnotationCodeRevision])
+	}
+	for _, c := range srvDeploy.Spec.Template.Spec.Containers {
+		if c.Name == "g10k-sync" {
+			t.Error("synchronized rollout must not run a g10k sidecar")
+		}
 	}
 	if updated.Status.ObservedCommit != "a1b2c3d4e5f6" {
 		t.Errorf("expected Status.ObservedCommit=a1b2c3d4e5f6, got %s", updated.Status.ObservedCommit)
@@ -308,12 +382,22 @@ func TestVoxNodeReconciler_SignENCAndAtomicDecommission(t *testing.T) {
 
 	// Start mock OpenVox CA + OpenVox DB HTTP server to verify atomic API calls
 	var caSigned, caCleaned, pdbDeactivated []string
+	certState := "requested"
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/puppet-ca/v1/certificate_status/"):
+			fp := ""
+			if certState == "signed" {
+				fp = "AA:BB:CC"
+			}
+			_, _ = w.Write([]byte(`{"name":"web01.example.com","state":"` + certState + `","fingerprint":"` + fp + `"}`))
 		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/puppet-ca/v1/certificate_status/"):
 			certname := strings.TrimPrefix(r.URL.Path, "/puppet-ca/v1/certificate_status/")
 			caSigned = append(caSigned, certname)
+			certState = "signed"
 			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/pdb/query/v4/nodes/"):
+			_, _ = w.Write([]byte(`{"certname":"web01.example.com","report_timestamp":"2026-11-16T10:00:00Z","latest_report_status":"changed"}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/puppet-ca/v1/clean":
 			caCleaned = append(caCleaned, "web01.example.com")
 			w.WriteHeader(http.StatusOK)
@@ -334,6 +418,7 @@ func TestVoxNodeReconciler_SignENCAndAtomicDecommission(t *testing.T) {
 		},
 		Status: openvoxv1alpha1.VoxClusterStatus{
 			ServerURL:   mockServer.URL,
+			CAURL:       mockServer.URL,
 			DatabaseURL: mockServer.URL,
 		},
 	}
@@ -389,8 +474,20 @@ func TestVoxNodeReconciler_SignENCAndAtomicDecommission(t *testing.T) {
 		t.Fatalf("expected ENC ConfigMap production-enc-nodes: %v", err)
 	}
 	encYAML := encCM.Data["web01.example.com.yaml"]
-	if !strings.Contains(encYAML, "role: webserver") || !strings.Contains(encYAML, "profile::nginx") {
+	if !strings.Contains(encYAML, "role: webserver") || !strings.Contains(encYAML, "profile::nginx") ||
+		!strings.Contains(encYAML, "voxkube_namespace: openvox") || !strings.Contains(encYAML, "voxkube_node: web01") {
 		t.Errorf("unexpected ENC YAML:\n%s", encYAML)
+	}
+
+	signedNode := &openvoxv1alpha1.VoxNode{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "web01"}, signedNode); err != nil {
+		t.Fatal(err)
+	}
+	if !signedNode.Status.CertificateSigned || signedNode.Status.CertificateFingerprint != "AA:BB:CC" {
+		t.Errorf("expected signed certificate with the CA's real fingerprint, got %+v", signedNode.Status)
+	}
+	if signedNode.Status.Phase != openvoxv1alpha1.NodePhaseActive || signedNode.Status.LastReportStatus != "changed" || signedNode.Status.LastSeenTime == nil {
+		t.Errorf("expected Active phase with PuppetDB report data, got %+v", signedNode.Status)
 	}
 
 	// Now transition node to Decommissioned and verify atomic CA clean + PuppetDB deactivate node
@@ -429,7 +526,9 @@ func TestVoxDiscoveryReconciler_EndpointSlicesAndOpenVoxCAMTLS(t *testing.T) {
 
 	// Mock PuppetDB /pdb/query/v4/inventory endpoint returning 2 active Linux VMs and 1 deactivated VM
 	deactivatedTime := "2026-11-10T00:00:00Z"
+	var seenQuery string
 	mockPDB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenQuery = r.URL.Query().Get("query")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
 			{
@@ -528,6 +627,10 @@ func TestVoxDiscoveryReconciler_EndpointSlicesAndOpenVoxCAMTLS(t *testing.T) {
 		t.Fatalf("VoxDiscovery Reconcile failed: %v", err)
 	}
 
+	if !strings.Contains(seenQuery, `type = "Class" and title = "Profile::Node_exporter"`) || !strings.Contains(seenQuery, `environment = "production"`) {
+		t.Errorf("expected classes and environment to be filtered server-side via PQL, got %q", seenQuery)
+	}
+
 	// 1. Verify EndpointSlice contains only the 2 active nodes (not old-vm.example.com)
 	slice := &discoveryv1.EndpointSlice{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "puppet-node-exporter-0"}, slice); err != nil {
@@ -587,6 +690,6 @@ type mockGitPoller struct {
 	sha string
 }
 
-func (m *mockGitPoller) ResolveHEAD(_ context.Context, _, _ string) (string, error) {
-	return m.sha, nil
+func (m *mockGitPoller) Resolve(_ context.Context, _ string, _ *GitAuth) (GitRevision, error) {
+	return GitRevision{Head: m.sha, RefsHash: "refs-1"}, nil
 }
