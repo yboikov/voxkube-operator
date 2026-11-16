@@ -91,10 +91,6 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Pinned ${{ matrix.version_arg }}=$v"
 
-      - name: Set up QEMU for multi-arch builds
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -125,13 +121,13 @@ jobs:
           labels: |
             org.opencontainers.image.version=${{ steps.ver.outputs.version || steps.opver.outputs.version }}
 
-      # Pull requests build amd64 only and push nothing, so a bad pin fails before merge.
+      # Pull requests build and push nothing, so a bad pin fails before merge.
       - name: Build ${{ github.event_name == 'pull_request' && '' || 'and push ' }}${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.file }}
-          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

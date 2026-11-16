@@ -62,7 +62,8 @@ update that section in the same change. Never document a field as working unless
 4. Files mounted with `subPath` don't update in place. Put their content into the `voxkube.io/config-hash` pod
    annotation so changes roll the pods.
 5. Never put secrets in ConfigMaps (e.g. `database.ini` lives in a Secret).
-6. The owner's environment does not allow Docker Hub at runtime and uses only Rocky/Ubuntu/RHEL hosts. Prefer
+6. The owner's environment does not allow Docker Hub at runtime and uses only Rocky/Ubuntu/RHEL hosts.
+   Images are built for `linux/amd64` only (arm64 was dropped on purpose). Prefer
    `registry.access.redhat.com`, `quay.io` or `ghcr.io` images. (The build stages still use `docker.io/library/golang`,
    a known item to replace.)
 7. Keep `README.md` → "API Reference" accurate (see above), including the "Known limitations" list.

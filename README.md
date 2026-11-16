@@ -28,7 +28,7 @@ Running Puppet / OpenVox inside Kubernetes or OpenShift traditionally hits four 
    - If a pod restarts or you restore a cluster from storage backup, VoxKube reuses the existing CA certificate, private key, CRL, and signed client inventory on the PVC. Your existing VMs continue checking in without re-enrolling.
 3. **100% OpenShift `restricted-v2` SCC Compliant**:
    - All workloads (`voxkube-operator`, `openvox-server`, `openvox-db`, `postgresql`) run rootless without hardcoded UIDs/GIDs, allowing OpenShift to assign arbitrary namespace UIDs cleanly.
-4. **First-Party Multi-Arch Container Images (`linux/amd64` & `linux/arm64`)**:
+4. **First-Party Container Images (`linux/amd64`)**:
    - Built directly from official Vox Pupuli OpenVox 8 packages (`yum.voxpupuli.org`) on Red Hat UBI 9 via GitHub Actions:
      - `ghcr.io/yboikov/voxkube-operator:<git sha>` (and `latest`)
      - `ghcr.io/yboikov/openvox-server:8.18.0` / `ghcr.io/yboikov/openvox-db:8.18.0`
@@ -809,7 +809,7 @@ Tags pushed from `main` for each OpenVox image:
 | `<version>-<sha>` | `8.18.0-1a2b3c4` | **Immutable.** Use this, or a digest, for production GitOps. |
 | `<sha>`, `latest` | | `latest` follows `main`. |
 
-Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release appears, updating every location above. It never proposes 9.x, because the images use the `openvox8` repository. Keep the server and DB on the same version. Pull requests build the images (amd64, no push), so a bad pin fails before merge.
+Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release appears, updating every location above. It never proposes 9.x, because the images use the `openvox8` repository. Keep the server and DB on the same version. Pull requests build the images (no push), so a bad pin fails before merge.
 
 ### Known limitations
 
@@ -834,7 +834,7 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 
 1. In a PR: set `version` and `appVersion` in `charts/voxkube-operator/Chart.yaml` to the new version, and move the `[Unreleased]` entries in `CHANGELOG.md` under it. Merge.
 2. Tag the merge commit on `main` and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
-3. CI builds and pushes the multi-arch images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and creates the GitHub Release with generated notes, the chart package and `voxkube-crds.yaml`.
+3. CI builds and pushes the images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and creates the GitHub Release with generated notes, the chart package and `voxkube-crds.yaml`.
 
 Helm does not upgrade CRDs. After upgrading the chart, apply the new CRDs: `kubectl apply --server-side -f https://github.com/yboikov/voxkube-operator/releases/download/v0.2.0/voxkube-crds.yaml`.
 
