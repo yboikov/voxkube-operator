@@ -252,8 +252,9 @@ spec:
                         type: string
                     type: object
                   image:
-                    default: ghcr.io/yboikov/openvox-db:latest
-                    description: Image is the OpenVox DB container image.
+                    description: |-
+                      Image is the OpenVox DB container image. When empty, the operator uses the OpenVoxDB version it was
+                      released with (ghcr.io/yboikov/openvox-db:<version>, see internal/controller/versions.go).
                     type: string
                   postgres:
                     description: Postgres configures either an external PostgreSQL
@@ -407,8 +408,9 @@ spec:
                         type: integer
                     type: object
                   image:
-                    default: ghcr.io/yboikov/openvox-server:latest
-                    description: Image is the OpenVox Server container image.
+                    description: |-
+                      Image is the OpenVox Server container image. When empty, the operator uses the OpenVox Server version it was
+                      released with (ghcr.io/yboikov/openvox-server:<version>, see internal/controller/versions.go).
                     type: string
                   imagePullPolicy:
                     default: IfNotPresent
