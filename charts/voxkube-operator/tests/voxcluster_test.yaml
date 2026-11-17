@@ -43,9 +43,14 @@ tests:
           git:
             remote: https://github.com/myorg/puppet-control-repo.git
         networking:
-          externalHostname: puppet.apps.ocp.example.com
-          openShiftRoute:
-            enabled: true
+          server:
+            externalHostname: puppet.apps.ocp.example.com
+            openShiftRoute:
+              enabled: true
+          ca:
+            externalHostname: puppet-ca.apps.ocp.example.com
+            openShiftRoute:
+              enabled: true
     asserts:
       - hasDocuments:
           count: 1
@@ -61,5 +66,14 @@ tests:
           path: spec.database.housekeeping.nodeTTL
           value: "7d"
       - equal:
-          path: spec.networking.openShiftRoute.enabled
+          path: spec.networking.server.openShiftRoute.enabled
+          value: true
+      - equal:
+          path: spec.networking.server.externalHostname
+          value: puppet.apps.ocp.example.com
+      - equal:
+          path: spec.networking.ca.externalHostname
+          value: puppet-ca.apps.ocp.example.com
+      - equal:
+          path: spec.networking.ca.openShiftRoute.enabled
           value: true

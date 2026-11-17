@@ -87,9 +87,13 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 				},
 			},
 			Networking: openvoxv1alpha1.ClusterNetworkingSpec{
-				ExternalHostname: "puppet.apps.ocp.example.com",
-				OpenShiftRoute: &openvoxv1alpha1.OpenShiftRouteSpec{
-					Enabled: true,
+				Server: openvoxv1alpha1.EndpointNetworkingSpec{
+					ExternalHostname: "puppet.apps.ocp.example.com",
+					OpenShiftRoute:   &openvoxv1alpha1.OpenShiftRouteSpec{Enabled: true},
+				},
+				CA: openvoxv1alpha1.EndpointNetworkingSpec{
+					ExternalHostname: "puppet-ca.apps.ocp.example.com",
+					ServiceType:      corev1.ServiceTypeLoadBalancer,
 				},
 			},
 		},
@@ -198,10 +202,25 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"production-db.openvox.svc", "production-ca.openvox.svc.cluster.local", "puppet.apps.ocp.example.com"} {
+	for _, want := range []string{"production-db.openvox.svc", "production-ca.openvox.svc.cluster.local", "puppet.apps.ocp.example.com", "puppet-ca.apps.ocp.example.com"} {
 		if !slices.Contains(leaf.DNSNames, want) {
 			t.Errorf("expected service certificate SAN %q, got %v", want, leaf.DNSNames)
 		}
+	}
+
+	// 6b. External endpoints: the compilers via a Route (443), the CA via a LoadBalancer Service (8140)
+	if updated.Status.ServerExternalURL != "https://puppet.apps.ocp.example.com:443" {
+		t.Errorf("unexpected serverExternalURL %q", updated.Status.ServerExternalURL)
+	}
+	if updated.Status.CAExternalURL != "https://puppet-ca.apps.ocp.example.com:8140" {
+		t.Errorf("unexpected caExternalURL %q", updated.Status.CAExternalURL)
+	}
+	caService := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-ca"}, caService); err != nil {
+		t.Fatal(err)
+	}
+	if caService.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Errorf("expected the CA Service to be a LoadBalancer, got %s", caService.Spec.Type)
 	}
 
 	// 7. g10k configuration is rendered and compilers talk to OpenVox DB

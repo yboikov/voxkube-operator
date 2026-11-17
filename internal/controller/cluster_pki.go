@@ -56,12 +56,14 @@ func serviceDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
 		add(svc + "." + ns + ".svc")
 		add(svc + "." + ns + ".svc.cluster.local")
 	}
-	add(cluster.Spec.Networking.ExternalHostname)
-	if rt := cluster.Spec.Networking.OpenShiftRoute; rt != nil && rt.Enabled {
-		add(rt.Host)
-	}
-	for _, n := range cluster.Spec.Networking.AdditionalDNSNames {
-		add(n)
+	for _, ep := range []openvoxv1alpha1.EndpointNetworkingSpec{cluster.Spec.Networking.Server, cluster.Spec.Networking.CA} {
+		add(ep.ExternalHostname)
+		if rt := ep.OpenShiftRoute; rt != nil && rt.Enabled {
+			add(rt.Host)
+		}
+		for _, n := range ep.AdditionalDNSNames {
+			add(n)
+		}
 	}
 	return names
 }

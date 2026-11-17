@@ -8,6 +8,30 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Breaking
+- `spec.networking` is split into `server` and `ca` blocks with the same fields. Move `externalHostname`,
+  `additionalDNSNames`, `serviceType` and `openShiftRoute` under `networking.server`:
+
+  ```yaml
+  # 0.1.x                          # 0.2.0
+  networking:                      networking:
+    externalHostname: puppet.x       server:
+    openShiftRoute:                    externalHostname: puppet.x
+      enabled: true                    openShiftRoute:
+                                         enabled: true
+  ```
+  Helm values move the same way (`cluster.networking.server.*`). Apply the new CRDs before upgrading the chart.
+
+### Added
+- The CA can be exposed to agents outside the cluster: `networking.ca` (external hostname, Service type,
+  passthrough Route `<cluster>-ca`). Its hostnames are added to the service certificate.
+- `status.serverExternalURL` and `status.caExternalURL` show what agents should use as `server` / `ca_server`.
+
+### Fixed
+- Disabling `openShiftRoute` now deletes the Route instead of leaving it behind.
+
 ## [0.1.0]: first release
 
 ### Added
@@ -26,5 +50,6 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yboikov/voxkube-operator/releases/tag/v0.1.0

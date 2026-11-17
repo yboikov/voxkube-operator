@@ -66,21 +66,23 @@ type VoxClusterReconciler struct {
 
 // clusterState collects what one reconcile observed; it is turned into VoxCluster status.
 type clusterState struct {
-	caSecretName    string
-	tlsHash         string
-	caURL           string
-	caEnabled       bool
-	caReady         bool
-	caMessage       string
-	dbEnabled       bool
-	dbURL           string
-	dbReady         bool
-	dbMessage       string
-	hieraSecretName string
-	code            *codePlan
-	serverURL       string
-	readyReplicas   int32
-	desiredReplicas int32
+	caSecretName      string
+	tlsHash           string
+	caURL             string
+	caEnabled         bool
+	caReady           bool
+	caMessage         string
+	dbEnabled         bool
+	dbURL             string
+	dbReady           bool
+	dbMessage         string
+	hieraSecretName   string
+	code              *codePlan
+	serverURL         string
+	serverExternalURL string
+	caExternalURL     string
+	readyReplicas     int32
+	desiredReplicas   int32
 }
 
 // +kubebuilder:rbac:groups=voxkube.io,resources=voxclusters,verbs=get;list;watch;create;update;patch;delete
@@ -188,11 +190,9 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 	if err := r.reconcileAutoscaling(ctx, cluster); err != nil {
 		return fmt.Errorf("reconciling HorizontalPodAutoscaler: %w", err)
 	}
-	serverURL, err := r.reconcileNetworking(ctx, cluster)
-	if err != nil {
+	if err := r.reconcileNetworking(ctx, cluster, st); err != nil {
 		return fmt.Errorf("reconciling networking: %w", err)
 	}
-	st.serverURL = serverURL
 	return nil
 }
 
@@ -217,6 +217,8 @@ func (r *VoxClusterReconciler) updateClusterStatus(
 		status.DatabaseURL = st.dbURL
 		status.HieraSecretName = st.hieraSecretName
 		status.ReadyReplicas = st.readyReplicas
+		status.ServerExternalURL = st.serverExternalURL
+		status.CAExternalURL = st.caExternalURL
 	}
 	if st.serverURL != "" {
 		status.ServerURL = st.serverURL

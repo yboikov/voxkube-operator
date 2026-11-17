@@ -78,7 +78,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.1.0 \
+  --version 0.2.0 \
   --namespace openvox \
   --create-namespace
 ```
@@ -119,8 +119,10 @@ spec:
     postgres:
       mode: builtin # ephemeral, dev/demo only; use mode: external (e.g. CloudNativePG) in production
   networking:
-    externalHostname: puppet.example.com
-    serviceType: ClusterIP
+    server:
+      externalHostname: puppet.example.com
+    ca:
+      externalHostname: puppet-ca.example.com
 ```
 
 Check the deployed pods and services:
@@ -323,7 +325,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `ca` | [`ClusterCASpec`](#voxclusterspecca) | no | Dedicated OpenVox CA. |
 | `server` | [`ClusterServerSpec`](#voxclusterspecserver) | no | Compiler pool. Also supplies the image and pod security context for the CA. |
 | `database` | [`ClusterDatabaseSpec`](#voxclusterspecdatabase) | no | OpenVox DB and PostgreSQL. |
-| `networking` | [`ClusterNetworkingSpec`](#voxclusterspecnetworking) | no | Service type, TLS SANs, OpenShift Route. |
+| `networking` | [`ClusterNetworkingSpec`](#voxclusterspecnetworking) | no | Exposure of the compilers (`server`) and the CA (`ca`): hostnames, Service types, OpenShift Routes. |
 | `hieraSecrets` | [`HieraSecretsSpec`](#voxclusterspechierasecrets) | no | Secret to Hiera bridge. |
 | `workflows` | [`ClusterWorkflowsSpec`](#voxclusterspecworkflows) | no | ENC, metadata, reports, maintenance. |
 
@@ -469,16 +471,50 @@ spec:
 
 #### `VoxCluster.spec.networking`
 
+Two blocks with the same fields: `server` (the compilers, what agents set as `server`) and `ca` (the CA, what agents set as `ca_server`).
+
+| Field | Description |
+|---|---|
+| `server` | [`EndpointNetworkingSpec`](#voxclusterspecnetworkingserver--ca) for Service `<cluster>` (port `8140`, named `puppet`) and Route `<cluster>`. |
+| `ca` | [`EndpointNetworkingSpec`](#voxclusterspecnetworkingserver--ca) for Service `<cluster>-ca` (port `8140`, named `https-ca`) and Route `<cluster>-ca`. Ignored when `spec.ca.enabled: false`. |
+
+```yaml
+networking:
+  server:
+    externalHostname: puppet.apps.example.com
+    openShiftRoute:
+      enabled: true
+  ca:
+    externalHostname: puppet-ca.apps.example.com
+    openShiftRoute:
+      enabled: true
+```
+
+#### `VoxCluster.spec.networking.server` / `.ca`
+
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `externalHostname` | string | – | – | Added as a SAN on the service certificate, and used as the Route host when `openShiftRoute.host` is empty. |
+| `externalHostname` | string | – | – | DNS name agents use for this endpoint. Added to the certificate SANs, and used as the Route host when `openShiftRoute.host` is empty. |
 | `additionalDNSNames` | []string | – | – | Extra SANs. |
-| `serviceType` | string | `ClusterIP` | `ClusterIP` \| `NodePort` \| `LoadBalancer` | Type of Service `<cluster>` (port `8140`, named `puppet`). The CA, DB and PostgreSQL Services are always `ClusterIP`. |
-| `openShiftRoute.enabled` | bool | `false` | – | Creates a `route.openshift.io/v1` Route `<cluster>` with TLS `passthrough`. Skipped if the Route API doesn't exist. |
+| `serviceType` | string | `ClusterIP` | `ClusterIP` \| `NodePort` \| `LoadBalancer` | Type of the endpoint's Service. The DB and PostgreSQL Services are always `ClusterIP`. |
+| `openShiftRoute.enabled` | bool | `false` | – | Creates a `route.openshift.io/v1` Route with TLS `passthrough` to the endpoint's Service. Setting it back to `false` deletes the Route. Skipped if the Route API doesn't exist. |
 | `openShiftRoute.host` | string | `externalHostname` | – | Route host (also added as a SAN). |
 | `openShiftRoute.annotations` | map[string]string | – | – | Annotations on the Route. |
 
-The service certificate covers `<cluster>`, `<cluster>-ca` and `<cluster>-db` in every in-cluster form (`name`, `name.ns`, `name.ns.svc`, `name.ns.svc.cluster.local`), plus the names above. It is re-issued automatically when this list changes. The CA Service `<cluster>-ca` isn't exposed by the Route, so agents outside the Kubernetes cluster need another way to reach `ca_server`.
+The CA and the compilers share one service certificate. It covers `<cluster>`, `<cluster>-ca` and `<cluster>-db` in every in-cluster form (`name`, `name.ns`, `name.ns.svc`, `name.ns.svc.cluster.local`), plus every hostname from **both** blocks. It is re-issued automatically when this list changes, and the pods roll.
+
+The compilers run with the CA service disabled, and a passthrough Route can't route by path, so the CA needs its own hostname. Agent configuration for the example above (Routes listen on 443):
+
+```ini
+# /etc/puppetlabs/puppet/puppet.conf on the agent
+[agent]
+server     = puppet.apps.example.com
+ca_server  = puppet-ca.apps.example.com
+serverport = 443
+ca_port    = 443
+```
+
+`status.serverExternalURL` and `status.caExternalURL` show the URLs to use.
 
 #### `VoxCluster.spec.hieraSecrets`
 
@@ -511,6 +547,7 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 | `observedGeneration` | int64 | `metadata.generation` last processed. |
 | `serverURL` | string | `https://<cluster>.<ns>.svc.cluster.local:8140` |
 | `caURL` | string | `https://<cluster>-ca.<ns>.svc.cluster.local:8140`, or empty if `ca.enabled: false`. |
+| `serverExternalURL` / `caExternalURL` | string | URL for agents outside the Kubernetes cluster, derived from `networking.server` / `networking.ca`: `https://<route host>:443` with a Route, `https://<externalHostname>:<node port>` for `NodePort`, otherwise `https://<externalHostname>:8140`. Empty when the endpoint has no external hostname. |
 | `databaseURL` | string | `https://<cluster>-db.<ns>.svc.cluster.local:8081` (mTLS), or empty if the database is disabled. |
 | `caSecretName` | string | `<cluster>-ca-tls` |
 | `hieraSecretName` | string | `<cluster>-hiera-secrets`, or empty if disabled. |
@@ -538,7 +575,7 @@ All of these are labelled `app.kubernetes.io/name=voxkube`, `app.kubernetes.io/i
 | ConfigMap | `<c>-server-config` | `puppet.conf`, `puppetdb.conf`, `routes.yaml`, `enc.sh`, `enc-default.yaml`, `hiera.yaml`, … |
 | Deployment, Service | `<c>-server`, `<c>` | Compilers, port `8140`. |
 | HorizontalPodAutoscaler | `<c>-server` | `autoscaling.enabled` only. |
-| Route | `<c>` | `openShiftRoute.enabled` only. |
+| Route | `<c>`, `<c>-ca` | `networking.server.openShiftRoute.enabled` / `networking.ca.openShiftRoute.enabled` only. |
 
 Annotations set by the operator: `voxkube.io/spec-hash` on managed workloads and Services; `voxkube.io/config-hash`, `voxkube.io/tls-hash`, `voxkube.io/code-revision` and `voxkube.io/observed-commit` on pod templates.
 
