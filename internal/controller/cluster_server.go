@@ -593,63 +593,133 @@ func (r *VoxClusterReconciler) reconcileAutoscaling(ctx context.Context, cluster
 	return r.Update(ctx, existing)
 }
 
-func (r *VoxClusterReconciler) reconcileNetworking(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (string, error) {
-	svcType := cluster.Spec.Networking.ServiceType
-	if svcType == "" {
-		svcType = corev1.ServiceTypeClusterIP
+func serviceTypeOrDefault(t corev1.ServiceType) corev1.ServiceType {
+	if t == "" {
+		return corev1.ServiceTypeClusterIP
 	}
+	return t
+}
 
+// reconcileNetworking creates the compiler Service and the Routes of both endpoints, and records their
+// external URLs in st.
+func (r *VoxClusterReconciler) reconcileNetworking(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, st *clusterState) error {
+	ep := cluster.Spec.Networking.Server
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: cluster.Name, Namespace: cluster.Namespace, Labels: voxClusterLabels(cluster.Name, "server")},
 		Spec: corev1.ServiceSpec{
-			Type:     svcType,
+			Type:     serviceTypeOrDefault(ep.ServiceType),
 			Selector: voxClusterLabels(cluster.Name, "server"),
 			Ports:    []corev1.ServicePort{{Name: "puppet", Port: 8140, TargetPort: intstr.FromInt32(8140), Protocol: corev1.ProtocolTCP}},
 		},
 	}
 	if err := controllerutil.SetControllerReference(cluster, svc, r.Scheme); err != nil {
-		return "", err
+		return err
 	}
 	if err := r.createOrUpdateService(ctx, svc); err != nil {
-		return "", err
+		return err
 	}
+	if err := r.reconcileEndpointRoute(ctx, cluster, ep, cluster.Name, cluster.Name, "puppet"); err != nil {
+		return err
+	}
+	st.serverURL = fmt.Sprintf("https://%s.%s.svc.cluster.local:8140", cluster.Name, cluster.Namespace)
+	st.serverExternalURL = r.endpointExternalURL(ctx, cluster, ep, cluster.Name)
 
-	if cluster.Spec.Networking.OpenShiftRoute != nil && cluster.Spec.Networking.OpenShiftRoute.Enabled {
-		host := cluster.Spec.Networking.OpenShiftRoute.Host
-		if host == "" {
-			host = cluster.Spec.Networking.ExternalHostname
-		}
+	caName := cluster.Name + "-ca"
+	caEP := cluster.Spec.Networking.CA
+	if !caEnabled(cluster) {
+		caEP = openvoxv1alpha1.EndpointNetworkingSpec{} // removes a CA Route left over from when the CA was enabled
+	}
+	if err := r.reconcileEndpointRoute(ctx, cluster, caEP, caName, caName, "https-ca"); err != nil {
+		return err
+	}
+	if caEnabled(cluster) {
+		st.caExternalURL = r.endpointExternalURL(ctx, cluster, caEP, caName)
+	}
+	return nil
+}
 
-		routeObj := &unstructured.Unstructured{}
-		routeObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "route.openshift.io", Version: "v1", Kind: "Route"})
-		routeObj.SetName(cluster.Name)
-		routeObj.SetNamespace(cluster.Namespace)
-		routeObj.SetLabels(voxClusterLabels(cluster.Name, "route"))
-		if len(cluster.Spec.Networking.OpenShiftRoute.Annotations) > 0 {
-			routeObj.SetAnnotations(cluster.Spec.Networking.OpenShiftRoute.Annotations)
-		}
-		routeSpec := map[string]interface{}{
-			"to":   map[string]interface{}{"kind": "Service", "name": cluster.Name},
-			"port": map[string]interface{}{"targetPort": "puppet"},
-			"tls": map[string]interface{}{
-				"termination":                   "passthrough",
-				"insecureEdgeTerminationPolicy": "None",
-			},
-		}
-		if host != "" {
-			routeSpec["host"] = host
-		}
-		routeObj.Object["spec"] = routeSpec
+func routeHost(ep openvoxv1alpha1.EndpointNetworkingSpec) string {
+	if ep.OpenShiftRoute != nil && ep.OpenShiftRoute.Host != "" {
+		return ep.OpenShiftRoute.Host
+	}
+	return ep.ExternalHostname
+}
 
-		if err := controllerutil.SetControllerReference(cluster, routeObj, r.Scheme); err != nil {
-			return "", err
-		}
-		if err := r.createOrUpdateUnstructured(ctx, routeObj); err != nil {
-			if !meta.IsNoMatchError(err) && !strings.Contains(err.Error(), "no matches for kind \"Route\"") {
-				return "", err
+// reconcileEndpointRoute creates or deletes the passthrough Route of one endpoint.
+func (r *VoxClusterReconciler) reconcileEndpointRoute(
+	ctx context.Context,
+	cluster *openvoxv1alpha1.VoxCluster,
+	ep openvoxv1alpha1.EndpointNetworkingSpec,
+	routeName, serviceName, targetPort string,
+) error {
+	routeObj := &unstructured.Unstructured{}
+	routeObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "route.openshift.io", Version: "v1", Kind: "Route"})
+	routeObj.SetName(routeName)
+	routeObj.SetNamespace(cluster.Namespace)
+
+	if ep.OpenShiftRoute == nil || !ep.OpenShiftRoute.Enabled {
+		existing := &unstructured.Unstructured{}
+		existing.SetGroupVersionKind(routeObj.GroupVersionKind())
+		err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: routeName}, existing)
+		switch {
+		case err == nil:
+			if metav1.IsControlledBy(existing, cluster) {
+				return client.IgnoreNotFound(r.Delete(ctx, existing))
 			}
+			return nil
+		case apierrors.IsNotFound(err) || isNoMatch(err, "Route"):
+			return nil
+		default:
+			return err
 		}
 	}
 
-	return fmt.Sprintf("https://%s.%s.svc.cluster.local:8140", cluster.Name, cluster.Namespace), nil
+	routeObj.SetLabels(voxClusterLabels(cluster.Name, "route"))
+	if len(ep.OpenShiftRoute.Annotations) > 0 {
+		routeObj.SetAnnotations(ep.OpenShiftRoute.Annotations)
+	}
+	routeSpec := map[string]interface{}{
+		"to":   map[string]interface{}{"kind": "Service", "name": serviceName},
+		"port": map[string]interface{}{"targetPort": targetPort},
+		"tls": map[string]interface{}{
+			"termination":                   "passthrough",
+			"insecureEdgeTerminationPolicy": "None",
+		},
+	}
+	if host := routeHost(ep); host != "" {
+		routeSpec["host"] = host
+	}
+	routeObj.Object["spec"] = routeSpec
+
+	if err := controllerutil.SetControllerReference(cluster, routeObj, r.Scheme); err != nil {
+		return err
+	}
+	if err := r.createOrUpdateUnstructured(ctx, routeObj); err != nil && !isNoMatch(err, "Route") {
+		return err
+	}
+	return nil
+}
+
+// endpointExternalURL returns the URL agents outside the Kubernetes cluster should use, or "" when the endpoint
+// has no external hostname. Routes listen on 443; LoadBalancer and ClusterIP (exposed by something else) on 8140;
+// NodePort on the allocated node port.
+func (r *VoxClusterReconciler) endpointExternalURL(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, ep openvoxv1alpha1.EndpointNetworkingSpec, serviceName string) string {
+	if ep.OpenShiftRoute != nil && ep.OpenShiftRoute.Enabled {
+		if host := routeHost(ep); host != "" {
+			return fmt.Sprintf("https://%s:443", host)
+		}
+		return ""
+	}
+	if ep.ExternalHostname == "" {
+		return ""
+	}
+	port := int32(8140)
+	if serviceTypeOrDefault(ep.ServiceType) == corev1.ServiceTypeNodePort {
+		svc := &corev1.Service{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: serviceName}, svc); err == nil &&
+			len(svc.Spec.Ports) > 0 && svc.Spec.Ports[0].NodePort != 0 {
+			port = svc.Spec.Ports[0].NodePort
+		}
+	}
+	return fmt.Sprintf("https://%s:%d", ep.ExternalHostname, port)
 }

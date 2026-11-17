@@ -44,15 +44,22 @@ spec:
       reportTTL: {{ .Values.cluster.database.housekeeping.reportTTL | default "14d" | quote }}
       gcInterval: {{ .Values.cluster.database.housekeeping.gcInterval | default 60 }}
   networking:
-    {{- if .Values.cluster.networking.externalHostname }}
-    externalHostname: {{ .Values.cluster.networking.externalHostname | quote }}
-    {{- end }}
-    serviceType: {{ .Values.cluster.networking.serviceType | default "ClusterIP" }}
-    {{- if .Values.cluster.networking.openShiftRoute.enabled }}
-    openShiftRoute:
-      enabled: true
-      {{- if .Values.cluster.networking.openShiftRoute.host }}
-      host: {{ .Values.cluster.networking.openShiftRoute.host | quote }}
+    {{- range $name, $ep := dict "server" .Values.cluster.networking.server "ca" .Values.cluster.networking.ca }}
+    {{ $name }}:
+      serviceType: {{ $ep.serviceType | default "ClusterIP" }}
+      {{- with $ep.externalHostname }}
+      externalHostname: {{ . | quote }}
+      {{- end }}
+      {{- with $ep.additionalDNSNames }}
+      additionalDNSNames:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and $ep.openShiftRoute $ep.openShiftRoute.enabled }}
+      openShiftRoute:
+        enabled: true
+        {{- with $ep.openShiftRoute.host }}
+        host: {{ . | quote }}
+        {{- end }}
       {{- end }}
     {{- end }}
   hieraSecrets:

@@ -82,11 +82,22 @@ cluster:
       reportTTL: 14d
       gcInterval: 60
   networking:
-    externalHostname: ""
-    serviceType: ClusterIP
-    openShiftRoute:
-      enabled: false
-      host: ""
+    # Compiler pool: what agents set as "server".
+    server:
+      externalHostname: ""
+      additionalDNSNames: []
+      serviceType: ClusterIP
+      openShiftRoute:
+        enabled: false
+        host: ""
+    # Certificate authority: what agents outside the cluster set as "ca_server".
+    ca:
+      externalHostname: ""
+      additionalDNSNames: []
+      serviceType: ClusterIP
+      openShiftRoute:
+        enabled: false
+        host: ""
   hieraSecrets:
     enabled: true
     commonSecrets: []

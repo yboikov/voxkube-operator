@@ -297,33 +297,47 @@ type DatabaseHousekeepingSpec struct {
 	GCInterval int32 `json:"gcInterval,omitempty"`
 }
 
-// ClusterNetworkingSpec configures external exposure and DNS SANs for the OpenVox cluster.
+// ClusterNetworkingSpec configures how the compilers and the CA are exposed.
+// Both endpoints serve the same service certificate, so every hostname listed in either block is added to its SANs.
 type ClusterNetworkingSpec struct {
-	// ExternalHostname is the primary DNS hostname Puppet agents use to connect (added to TLS SANs).
+	// Server exposes the compiler pool (Service "<cluster>", Route "<cluster>"). Agents use it as "server".
+	// +optional
+	Server EndpointNetworkingSpec `json:"server,omitempty"`
+
+	// CA exposes the certificate authority (Service "<cluster>-ca", Route "<cluster>-ca"). Agents outside the
+	// Kubernetes cluster use it as "ca_server".
+	// +optional
+	CA EndpointNetworkingSpec `json:"ca,omitempty"`
+}
+
+// EndpointNetworkingSpec configures the exposure of one endpoint (compilers or CA).
+type EndpointNetworkingSpec struct {
+	// ExternalHostname is the DNS name agents use to reach this endpoint (added to the certificate SANs).
 	// +optional
 	ExternalHostname string `json:"externalHostname,omitempty"`
 
-	// AdditionalDNSNames are extra DNS SANs included in the server TLS certificate.
+	// AdditionalDNSNames are extra DNS SANs added to the certificate.
 	// +optional
 	AdditionalDNSNames []string `json:"additionalDNSNames,omitempty"`
 
-	// ServiceType is the Kubernetes Service type for the Puppet server pool.
+	// ServiceType is the Kubernetes Service type of this endpoint.
 	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
-	// +kubebuilder:default="ClusterIP"
+	// +optional
 	ServiceType corev1.ServiceType `json:"serviceType,omitempty"`
 
-	// OpenShiftRoute configures an OpenShift Route (route.openshift.io/v1) with TLS passthrough.
+	// OpenShiftRoute configures an OpenShift Route (route.openshift.io/v1) with TLS passthrough to this endpoint.
 	// +optional
 	OpenShiftRoute *OpenShiftRouteSpec `json:"openShiftRoute,omitempty"`
 }
 
 // OpenShiftRouteSpec configures an OpenShift TLS passthrough Route.
 type OpenShiftRouteSpec struct {
-	// Enabled creates a route.openshift.io/v1 Route pointing to the Puppet server Service.
+	// Enabled creates a route.openshift.io/v1 Route with TLS passthrough to the endpoint's Service.
+	// Disabling it deletes the Route.
 	// +kubebuilder:default=false
 	Enabled bool `json:"enabled,omitempty"`
 
-	// Host is the optional hostname for the OpenShift Route (defaults to spec.networking.externalHostname).
+	// Host is the Route hostname (defaults to the endpoint's externalHostname). It is added to the certificate SANs.
 	// +optional
 	Host string `json:"host,omitempty"`
 
@@ -466,6 +480,14 @@ type VoxClusterStatus struct {
 	// CAURL is the URL of the dedicated OpenVox CA service.
 	// +optional
 	CAURL string `json:"caURL,omitempty"`
+
+	// ServerExternalURL is the URL agents outside the Kubernetes cluster use for "server", when exposed.
+	// +optional
+	ServerExternalURL string `json:"serverExternalURL,omitempty"`
+
+	// CAExternalURL is the URL agents outside the Kubernetes cluster use for "ca_server", when exposed.
+	// +optional
+	CAExternalURL string `json:"caExternalURL,omitempty"`
 
 	// DatabaseURL is the internal URL of OpenVox DB (PuppetDB).
 	// +optional
