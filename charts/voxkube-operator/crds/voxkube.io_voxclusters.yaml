@@ -337,45 +337,97 @@ spec:
                 description: Networking configures external Services, DNS SANs, and
                   OpenShift Routes.
                 properties:
-                  additionalDNSNames:
-                    description: AdditionalDNSNames are extra DNS SANs included in
-                      the server TLS certificate.
-                    items:
-                      type: string
-                    type: array
-                  externalHostname:
-                    description: ExternalHostname is the primary DNS hostname Puppet
-                      agents use to connect (added to TLS SANs).
-                    type: string
-                  openShiftRoute:
-                    description: OpenShiftRoute configures an OpenShift Route (route.openshift.io/v1)
-                      with TLS passthrough.
+                  ca:
+                    description: |-
+                      CA exposes the certificate authority (Service "<cluster>-ca", Route "<cluster>-ca"). Agents outside the
+                      Kubernetes cluster use it as "ca_server".
                     properties:
-                      annotations:
-                        additionalProperties:
+                      additionalDNSNames:
+                        description: AdditionalDNSNames are extra DNS SANs added to
+                          the certificate.
+                        items:
                           type: string
-                        description: Annotations are additional annotations added
-                          to the OpenShift Route.
+                        type: array
+                      externalHostname:
+                        description: ExternalHostname is the DNS name agents use to
+                          reach this endpoint (added to the certificate SANs).
+                        type: string
+                      openShiftRoute:
+                        description: OpenShiftRoute configures an OpenShift Route
+                          (route.openshift.io/v1) with TLS passthrough to this endpoint.
+                        properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations are additional annotations added
+                              to the OpenShift Route.
+                            type: object
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled creates a route.openshift.io/v1 Route with TLS passthrough to the endpoint's Service.
+                              Disabling it deletes the Route.
+                            type: boolean
+                          host:
+                            description: Host is the Route hostname (defaults to the
+                              endpoint's externalHostname). It is added to the certificate
+                              SANs.
+                            type: string
                         type: object
-                      enabled:
-                        default: false
-                        description: Enabled creates a route.openshift.io/v1 Route
-                          pointing to the Puppet server Service.
-                        type: boolean
-                      host:
-                        description: Host is the optional hostname for the OpenShift
-                          Route (defaults to spec.networking.externalHostname).
+                      serviceType:
+                        description: ServiceType is the Kubernetes Service type of
+                          this endpoint.
+                        enum:
+                        - ClusterIP
+                        - NodePort
+                        - LoadBalancer
                         type: string
                     type: object
-                  serviceType:
-                    default: ClusterIP
-                    description: ServiceType is the Kubernetes Service type for the
-                      Puppet server pool.
-                    enum:
-                    - ClusterIP
-                    - NodePort
-                    - LoadBalancer
-                    type: string
+                  server:
+                    description: Server exposes the compiler pool (Service "<cluster>",
+                      Route "<cluster>"). Agents use it as "server".
+                    properties:
+                      additionalDNSNames:
+                        description: AdditionalDNSNames are extra DNS SANs added to
+                          the certificate.
+                        items:
+                          type: string
+                        type: array
+                      externalHostname:
+                        description: ExternalHostname is the DNS name agents use to
+                          reach this endpoint (added to the certificate SANs).
+                        type: string
+                      openShiftRoute:
+                        description: OpenShiftRoute configures an OpenShift Route
+                          (route.openshift.io/v1) with TLS passthrough to this endpoint.
+                        properties:
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations are additional annotations added
+                              to the OpenShift Route.
+                            type: object
+                          enabled:
+                            default: false
+                            description: |-
+                              Enabled creates a route.openshift.io/v1 Route with TLS passthrough to the endpoint's Service.
+                              Disabling it deletes the Route.
+                            type: boolean
+                          host:
+                            description: Host is the Route hostname (defaults to the
+                              endpoint's externalHostname). It is added to the certificate
+                              SANs.
+                            type: string
+                        type: object
+                      serviceType:
+                        description: ServiceType is the Kubernetes Service type of
+                          this endpoint.
+                        enum:
+                        - ClusterIP
+                        - NodePort
+                        - LoadBalancer
+                        type: string
+                    type: object
                 type: object
               server:
                 description: Server configures the OpenVox catalog compiler pool.
@@ -608,6 +660,10 @@ spec:
           status:
             description: VoxClusterStatus defines the observed state of a VoxCluster.
             properties:
+              caExternalURL:
+                description: CAExternalURL is the URL agents outside the Kubernetes
+                  cluster use for "ca_server", when exposed.
+                type: string
               caSecretName:
                 description: CASecretName is the name of the Secret containing the
                   OpenVox CA certificate.
@@ -708,6 +764,10 @@ spec:
                 description: ReadyReplicas is the number of ready compiler pods.
                 format: int32
                 type: integer
+              serverExternalURL:
+                description: ServerExternalURL is the URL agents outside the Kubernetes
+                  cluster use for "server", when exposed.
+                type: string
               serverURL:
                 description: ServerURL is the external or cluster-internal URL where
                   Puppet agents connect.
