@@ -12,6 +12,9 @@
 
 VoxKube runs your Puppet infrastructure on Kubernetes or OpenShift. It uses [OpenVox](https://voxpupuli.org/openvox/), the community fork of Puppet 8, and is driven entirely by YAML.
 
+> [!TIP]
+> **Built for OpenShift.** Every pod runs under the default `restricted-v2` SCC (no root, no fixed UIDs), and **OpenShift Routes are included**: set `openShiftRoute.enabled: true` and the operator creates passthrough Routes for the compilers and the CA, adds their hostnames to the certificates, and reports the URLs agents should use in the `VoxCluster` status (`serverExternalURL`, `caExternalURL`). Agents outside the cluster connect on port 443, with no LoadBalancer or NodePort needed.
+
 Traditionally, a Puppet server lives on hand-built VMs. You sign each new machine's certificate by hand on the CA, keep machine roles in a separate tool such as Foreman, scatter secrets across encrypted Hiera files, and maintain a separate list of machines for monitoring. VoxKube replaces all of that with three Kubernetes resources. You describe the Puppet server, the machines it manages and what to monitor; the operator builds and runs everything, and keeps it that way. Approving a new machine, giving it a role, handing it a TLS certificate, muting its alerts or retiring it is a change to one YAML file, so it all fits into Git and ArgoCD like the rest of your cluster.
 
 ## The components
@@ -35,6 +38,7 @@ For a `VoxCluster` named `production`, the operator creates:
 | **Compilers** | `production-server` Deployment (2..N pods) | Compile catalogs for the agents. They hold no state, so you can scale them out or let an autoscaler do it. Their Puppet code comes from Git (via [g10k](https://github.com/xorpaul/g10k)), a PVC or an image. |
 | **OpenVox DB** | `production-db` Deployment | PuppetDB: stores facts, catalogs and reports. Optional; `VoxNode` status and `VoxDiscovery` need it. |
 | **PostgreSQL** | your database, or `production-postgres` | The database behind OpenVox DB. Use your own (for example CloudNativePG) in production; the built-in one is for demos and loses its data on restart. |
+| **Routes** (OpenShift) | `production` and `production-ca` Routes | Optional TLS-passthrough Routes for agents outside the cluster: `puppet.example.com:443` for catalogs, `puppet-ca.example.com:443` for certificates. On plain Kubernetes, use a LoadBalancer or NodePort Service instead. |
 
 ### How a machine joins
 
@@ -74,7 +78,7 @@ Removing the machine is the reverse: `state: Decommissioned` revokes its certifi
 - **The CA survives disasters.** The CA certificate and its data are not owned by the `VoxCluster`. Delete and recreate the cluster, or restore both from a backup, and existing machines keep working without re-enrolling.
 - **GitOps all the way.** Puppet code comes from Git by polling (no inbound webhooks through your firewall, GitHub App authentication supported), and machines are YAML files that ArgoCD can manage.
 - **Secrets stay in Kubernetes.** Secrets from External Secrets Operator or cert-manager reach Puppet through Hiera, always as `Sensitive`, so they never show up in logs or reports.
-- **Runs on OpenShift as is.** Every pod runs under the default `restricted-v2` SCC, with no fixed UIDs and no root.
+- **Runs on OpenShift as is.** Every pod runs under the default `restricted-v2` SCC, with no fixed UIDs and no root, and OpenShift Routes (TLS passthrough) for the compilers and the CA are built in.
 - **Pinned images.** `ghcr.io/yboikov/openvox-server` and `openvox-db` are built from the official OpenVox 8 packages on UBI 9, at a pinned version (see [Image versions](#image-versions)). No Docker Hub images are needed at runtime.
 
 **Where to go next:** [Quickstart](#5-minute-quickstart) · [Guides](#custom-resources-guide-custom-resources) · [API reference](#api-reference-api-reference) · [Releases & upgrading](#versioning--releases)
