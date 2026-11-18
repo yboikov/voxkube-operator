@@ -931,7 +931,7 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 |---|---|
 | Pull request | Lint, tests, and all images built **without pushing** (a bad version pin fails here). |
 | Push to `main` | Lint and tests only. No images. |
-| Release / pre-release (`v*` tag) | Images built and pushed, chart pushed, files attached to the GitHub Release. |
+| Release / pre-release (`v*` tag) | Operator image built and pushed. OpenVox images rebuilt only if `images/<image>/` changed since the previous release or the version tag doesn't exist yet; otherwise the existing image just gets the new tags. Chart pushed, files attached to the GitHub Release. |
 | Weekly (Monday) | OpenVox images of the latest release rebuilt for base-image security fixes. |
 
 **Releasing**
