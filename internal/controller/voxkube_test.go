@@ -231,6 +231,10 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	if !strings.Contains(g10kCM.Data["g10k.yaml"], "remote: 'https://github.com/myorg/puppet-control-repo.git'") {
 		t.Errorf("unexpected g10k.yaml:\n%s", g10kCM.Data["g10k.yaml"])
 	}
+	// g10k hardlinks from its cache into the environments: the cache must be on the code volume.
+	if !strings.Contains(g10kCM.Data["g10k.yaml"], ":cachedir: '/etc/puppetlabs/code/.g10k-cache'") {
+		t.Errorf("expected the g10k cache on the code volume, got:\n%s", g10kCM.Data["g10k.yaml"])
+	}
 	srvCM := &corev1.ConfigMap{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-server-config"}, srvCM); err != nil {
 		t.Fatalf("expected server ConfigMap: %v", err)
@@ -249,6 +253,16 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	for _, c := range srvDeploy.Spec.Template.Spec.Containers {
 		if c.Name == "g10k-sync" {
 			t.Error("synchronized rollout must not run a g10k sidecar")
+		}
+	}
+	for _, c := range srvDeploy.Spec.Template.Spec.InitContainers {
+		if c.Name != "g10k-init" {
+			continue
+		}
+		for _, m := range c.VolumeMounts {
+			if strings.HasPrefix(m.MountPath, "/etc/puppetlabs/code/") || m.MountPath == "/var/cache/g10k" {
+				t.Errorf("g10k-init must not mount a separate volume under or for the code/cache: %s", m.MountPath)
+			}
 		}
 	}
 	if updated.Status.ObservedCommit != "a1b2c3d4e5f6" {

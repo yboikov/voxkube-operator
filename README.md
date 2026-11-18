@@ -78,7 +78,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.2.0 \
+  --version 0.2.1 \
   --namespace openvox \
   --create-namespace
 ```
@@ -883,7 +883,28 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
    - **Pre-release** (to test unreleased code): same, with a tag like `v0.3.0-rc.1` and *Set as a pre-release* ticked. `Chart.yaml` doesn't need to change; the chart is packaged as `0.3.0-rc.1`.
 3. CI builds and pushes the images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and attaches the chart package and `voxkube-crds.yaml` to the release (creating it with generated notes if it doesn't exist yet). If the tag doesn't match `Chart.yaml`, the run fails: delete the release and tag, fix `Chart.yaml`, and try again.
 
-Helm does not upgrade CRDs. After upgrading the chart, apply the new CRDs: `kubectl apply --server-side -f https://github.com/yboikov/voxkube-operator/releases/download/v0.2.0/voxkube-crds.yaml`.
+### Upgrading
+
+`helm upgrade` never updates CRDs (Helm only creates them on the first install), so a new schema has to be applied separately and **before** the new operator starts.
+
+**With plain Helm**, for example to 0.2.0:
+
+1. Apply the release's CRDs. `--force-conflicts` is needed because Helm created them on the first install and still owns their fields:
+   ```bash
+   gh release download v0.2.0 -R yboikov/voxkube-operator -p voxkube-crds.yaml   # or download it from the release page
+   kubectl apply --server-side --force-conflicts -f voxkube-crds.yaml
+   ```
+   This only changes field ownership; existing `VoxCluster`/`VoxNode`/`VoxDiscovery` objects are untouched.
+2. Update your custom resources for any **Breaking** entries in [CHANGELOG.md](CHANGELOG.md) (0.2.0: `networking.*` moved to `networking.server.*`).
+3. Upgrade the operator:
+   ```bash
+   helm upgrade voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator --version 0.2.0 -n openvox
+   ```
+
+**With ArgoCD**, the CRDs in the chart are synced on every sync, so there's no separate step. Recommended:
+- Sync option `ServerSideApply=true`. Large CRD schemas can exceed the annotation size limit of client-side apply.
+- Don't prune CRDs (`argocd.argoproj.io/sync-options: Prune=false`, or no pruning on the app). Deleting a CRD deletes every resource of that kind.
+- Commit the chart version bump and the updated custom resources together, so they land in the same sync.
 
 ## Development & Local Testing
 
