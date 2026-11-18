@@ -78,7 +78,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.2.2 \
+  --version 0.2.3 \
   --namespace openvox \
   --create-namespace
 ```
@@ -321,9 +321,10 @@ kubectl -n openvox label vn web01 monitoring.voxkube.io/alerts-          # back 
 ```
 
 Write alert rules or Alertmanager routes against `alerts!="false"`, so machines without the label keep alerting.
-The `VoxDiscovery` reacts to VoxNode changes immediately. Per-target labels travel in each EndpointSlice endpoint's
-`deprecatedTopology` map, which Prometheus exposes as `__meta_kubernetes_endpointslice_endpoint_topology_*`; the
-ServiceMonitor maps them back with a `labelmap` relabeling.
+The `VoxDiscovery` reacts to VoxNode changes immediately. Machines are grouped into EndpointSlices by their
+per-target label set, and each slice carries its group's labels as `label.voxkube.io/<label>`. Prometheus exposes
+those as `__meta_kubernetes_endpointslice_label_*`, and the ServiceMonitor maps them back with a `labelmap`
+relabeling.
 
 Check it end to end:
 
@@ -807,7 +808,7 @@ All of these are owned by the `VoxDiscovery` and labelled `app.kubernetes.io/nam
 | Kind | Name | Notes |
 |---|---|---|
 | Service | `<vd>` | Headless (`clusterIP: None`), no selector. Also labelled with `serviceMonitor.targetLabels`. |
-| EndpointSlice | `<vd>-<n>` (IPv4), `<vd>-v6-<n>` (IPv6) | At most 100 endpoints each, sorted by certname. `hostname` = first DNS label of the certname, `nodeName` = certname, `deprecatedTopology` = per-target labels as `label.voxkube.io/<label>`. Surplus slices are pruned. |
+| EndpointSlice | `<vd>-<n>` (IPv4), `<vd>-v6-<n>` (IPv6); `<vd>-<hash>-<n>`, `<vd>-<hash>-v6-<n>` for machines with per-target labels | One set of slices per distinct per-target label set, labelled `label.voxkube.io/<label>=<value>`. At most 100 endpoints each, sorted by certname. `hostname` = first DNS label of the certname, `nodeName` = certname. Surplus slices are pruned. |
 | ServiceMonitor | `<vd>` | When `serviceMonitor.enabled`. Always `serviceDiscoveryRole: EndpointSlice`, plus a `labelmap` relabeling for the per-target labels. |
 | Secret | `<vd>-prometheus-scraper-tls` | When `tls.enabled` and `mode: openvoxCA`. |
 

@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"regexp"
@@ -290,7 +292,14 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		return nodes[i].Certname < nodes[j].Certname
 	})
 
-	var endpointsV4, endpointsV6 []discoveryv1.Endpoint
+	// Endpoints are grouped by their per-target label set: each group gets its own slices, which carry the labels
+	// as EndpointSlice labels (Prometheus exposes them as __meta_kubernetes_endpointslice_label_*).
+	type endpointGroup struct {
+		labels map[string]string
+		v4, v6 []discoveryv1.Endpoint
+	}
+	groups := map[string]*endpointGroup{}
+	discovered := 0
 	for _, n := range nodes {
 		if decommissionedSet[n.Certname] {
 			continue
@@ -308,16 +317,20 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 			NodeName:   &nodeName,
 			Conditions: discoveryv1.EndpointConditions{Ready: new(true)},
 		}
-		topology, skipped := endpointTopology(disc, n, nodeLabels[n.Certname])
+		targetLabels, skipped := endpointTargetLabels(disc, n, nodeLabels[n.Certname])
 		skippedLabels += skipped
-		if len(topology) > 0 {
-			ep.DeprecatedTopology = topology
+		key := labelSetKey(targetLabels)
+		g, ok := groups[key]
+		if !ok {
+			g = &endpointGroup{labels: targetLabels}
+			groups[key] = g
 		}
 		if ip.To4() != nil {
-			endpointsV4 = append(endpointsV4, ep)
+			g.v4 = append(g.v4, ep)
 		} else {
-			endpointsV6 = append(endpointsV6, ep)
+			g.v6 = append(g.v6, ep)
 		}
+		discovered++
 	}
 
 	var slicePorts []discoveryv1.EndpointPort
@@ -338,22 +351,32 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 	type sliceSpec struct {
 		name      string
 		family    discoveryv1.AddressType
+		labels    map[string]string
 		endpoints []discoveryv1.Endpoint
 	}
-	chunk := func(eps []discoveryv1.Endpoint, prefix string, family discoveryv1.AddressType) []sliceSpec {
+	chunk := func(eps []discoveryv1.Endpoint, prefix string, family discoveryv1.AddressType, labels map[string]string) []sliceSpec {
 		var out []sliceSpec
 		for i, idx := 0, 0; i < len(eps); i, idx = i+MaxEndpointsPerSlice, idx+1 {
 			end := i + MaxEndpointsPerSlice
 			if end > len(eps) {
 				end = len(eps)
 			}
-			out = append(out, sliceSpec{name: fmt.Sprintf("%s%d", prefix, idx), family: family, endpoints: eps[i:end]})
+			out = append(out, sliceSpec{name: fmt.Sprintf("%s%d", prefix, idx), family: family, labels: labels, endpoints: eps[i:end]})
 		}
 		return out
 	}
-	// IPv4 slices keep the historical "<svc>-<n>" names; IPv6 slices are "<svc>-v6-<n>".
-	slices := chunk(endpointsV4, svcName+"-", discoveryv1.AddressTypeIPv4)
-	slices = append(slices, chunk(endpointsV6, svcName+"-v6-", discoveryv1.AddressTypeIPv6)...)
+	// Endpoints without per-target labels keep the historical names "<svc>-<n>" (IPv4) and "<svc>-v6-<n>" (IPv6);
+	// a labelled group uses "<svc>-<hash of its labels>-<n>" and "<svc>-<hash>-v6-<n>".
+	var slices []sliceSpec
+	for _, key := range sortedGroupKeys(groups) {
+		g := groups[key]
+		prefix := svcName + "-"
+		if key != "" {
+			prefix = fmt.Sprintf("%s-%s-", svcName, shortHash(key))
+		}
+		slices = append(slices, chunk(g.v4, prefix, discoveryv1.AddressTypeIPv4, g.labels)...)
+		slices = append(slices, chunk(g.v6, prefix+"v6-", discoveryv1.AddressTypeIPv6, g.labels)...)
+	}
 	if len(slices) == 0 {
 		// Keep one empty EndpointSlice so the headless Service has a valid slice.
 		slices = []sliceSpec{{name: svcName + "-0", family: discoveryv1.AddressTypeIPv4}}
@@ -367,6 +390,9 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		labels := voxDiscoveryLabels(disc.Name)
 		labels[discoveryv1.LabelServiceName] = svcName
 		labels[discoveryv1.LabelManagedBy] = "voxkube-operator"
+		for name, v := range sl.labels {
+			labels[endpointLabelKeyPrefix+name] = v
+		}
 
 		slice := &discoveryv1.EndpointSlice{
 			ObjectMeta: metav1.ObjectMeta{
@@ -423,7 +449,7 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		}
 	}
 
-	return int32(len(endpointsV4) + len(endpointsV6)), int32(len(slices)), skippedLabels, nil
+	return int32(discovered), int32(len(slices)), skippedLabels, nil
 }
 
 func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
@@ -522,11 +548,11 @@ func buildServiceMonitorSpec(disc *openvoxv1alpha1.VoxDiscovery, scraperSecName 
 				"action":       "replace",
 			})
 		}
-		// Per-target labels (endpointLabels and VoxNode monitoring.voxkube.io/* labels) travel in the endpoint's
-		// deprecatedTopology map, which Prometheus exposes as __meta_kubernetes_endpointslice_endpoint_topology_*.
+		// Per-target labels (endpointLabels and VoxNode monitoring.voxkube.io/* labels) are labels of the
+		// EndpointSlices of each label group, which Prometheus exposes as __meta_kubernetes_endpointslice_label_*.
 		relabelings = append(relabelings, map[string]interface{}{
 			"action":      "labelmap",
-			"regex":       endpointTopologyMetaPrefix + "(.+)",
+			"regex":       endpointLabelMetaPrefix + "(.+)",
 			"replacement": "$1",
 		})
 		ep["relabelings"] = relabelings
@@ -596,10 +622,10 @@ func discoveryServiceLabels(disc *openvoxv1alpha1.VoxDiscovery) map[string]strin
 const (
 	// voxNodeMonitoringLabelPrefix marks VoxNode labels that become labels of the node's scrape targets.
 	voxNodeMonitoringLabelPrefix = "monitoring.voxkube.io/"
-	// endpointTopologyKeyPrefix prefixes per-target labels in EndpointSlice endpoints' deprecatedTopology.
-	endpointTopologyKeyPrefix = "label.voxkube.io/"
-	// endpointTopologyMetaPrefix is endpointTopologyKeyPrefix as Prometheus exposes it (invalid characters → "_").
-	endpointTopologyMetaPrefix = "__meta_kubernetes_endpointslice_endpoint_topology_label_voxkube_io_"
+	// endpointLabelKeyPrefix prefixes per-target labels on the EndpointSlices of their group.
+	endpointLabelKeyPrefix = "label.voxkube.io/"
+	// endpointLabelMetaPrefix is how Prometheus exposes those slice labels (invalid characters become "_").
+	endpointLabelMetaPrefix = "__meta_kubernetes_endpointslice_label_label_voxkube_io_"
 )
 
 // endpointLabelName is a Prometheus label name that is also a valid Kubernetes label key name segment.
@@ -637,10 +663,10 @@ func voxNodeMonitoringLabels(labels map[string]string) map[string]string {
 	return out
 }
 
-// endpointTopology builds the deprecatedTopology map carrying a node's per-target labels: endpointLabels from
-// its facts, overridden by its VoxNode's monitoring.voxkube.io/* labels. It returns how many labels were
-// skipped because the name or value cannot be used.
-func endpointTopology(disc *openvoxv1alpha1.VoxDiscovery, node DiscoveredPuppetNode, voxNodeLabels map[string]string) (map[string]string, int) {
+// endpointTargetLabels returns a node's per-target labels: endpointLabels from its facts, overridden by its
+// VoxNode's monitoring.voxkube.io/* labels. It also returns how many labels were skipped because the name or
+// value cannot be used.
+func endpointTargetLabels(disc *openvoxv1alpha1.VoxDiscovery, node DiscoveredPuppetNode, voxNodeLabels map[string]string) (map[string]string, int) {
 	labels := make(map[string]string)
 	skipped := 0
 	for name, factPath := range disc.Spec.EndpointLabels {
@@ -665,11 +691,33 @@ func endpointTopology(disc *openvoxv1alpha1.VoxDiscovery, node DiscoveredPuppetN
 	if len(labels) == 0 {
 		return nil, skipped
 	}
-	topology := make(map[string]string, len(labels))
-	for name, v := range labels {
-		topology[endpointTopologyKeyPrefix+name] = v
+	return labels, skipped
+}
+
+// labelSetKey is a canonical string for a label set ("" for none).
+func labelSetKey(labels map[string]string) string {
+	var b strings.Builder
+	for _, k := range sortedKeys(labels) {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(labels[k])
+		b.WriteByte(',')
 	}
-	return topology, skipped
+	return b.String()
+}
+
+func shortHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:8]
+}
+
+func sortedGroupKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func discoverySyncedMessage(nodes, slices int32, skippedLabels int) string {

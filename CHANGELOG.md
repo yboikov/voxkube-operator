@@ -8,6 +8,14 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.3]
+
+### Fixed
+- Per-target labels (`endpointLabels`, VoxNode `monitoring.voxkube.io/<label>`) never reached Prometheus: they
+  were written to the endpoints' `deprecatedTopology`, which the API server silently drops in
+  `discovery.k8s.io/v1`. Machines are now grouped into EndpointSlices by label set, each slice labelled
+  `label.voxkube.io/<label>`, and the ServiceMonitor maps `__meta_kubernetes_endpointslice_label_*` back.
+
 ### Changed
 - Releases no longer rebuild the OpenVox images when `images/<image>/` is unchanged since the previous release;
   the existing image gets the new tags instead.
@@ -90,7 +98,8 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/yboikov/voxkube-operator/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...v0.2.0

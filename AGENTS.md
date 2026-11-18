@@ -33,6 +33,11 @@ update that section in the same change. Never document a field as working unless
   - `puppetserver.conf` keeps the `master-*` key names that are known to work with the shipped image.
   - `spec.networking` has two symmetric blocks, `server` (compilers) and `ca`, sharing one service certificate
     whose SANs are the union of both. Add new exposure options to `EndpointNetworkingSpec`, not as flat fields.
+  - `VoxDiscovery` publishes targets only as EndpointSlices, so its ServiceMonitor must keep
+    `serviceDiscoveryRole: EndpointSlice`. Per-target labels (`endpointLabels`, VoxNode
+    `monitoring.voxkube.io/<label>`) are **EndpointSlice labels**: machines are grouped into slices by label set.
+    Do not put them in endpoints' `deprecatedTopology`: the API server silently drops that field in
+    `discovery.k8s.io/v1` (this shipped broken in 0.2.2).
 
 ## Code map
 
