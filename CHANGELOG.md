@@ -21,6 +21,10 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 - The weekly rebuild now refreshes the OpenVox images of the latest release and tags them `<openvox>-<YYYYMMDD>`,
   instead of rebuilding `main` and overwriting `<openvox>-<sha>`.
 
+### Added
+- Weekly GHCR cleanup workflow: keeps `latest`, every release/version tag and the newest 20 `<sha>`-only tags per
+  image; deletes older ones and untagged leftovers (never manifests still referenced by a kept image).
+
 ## [0.2.0]
 
 ### Breaking

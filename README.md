@@ -883,6 +883,8 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
    - **Pre-release** (to test unreleased code): same, with a tag like `v0.3.0-rc.1` and *Set as a pre-release* ticked. `Chart.yaml` doesn't need to change; the chart is packaged as `0.3.0-rc.1`.
 3. CI builds and pushes the images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and attaches the chart package and `voxkube-crds.yaml` to the release (creating it with generated notes if it doesn't exist yet). If the tag doesn't match `Chart.yaml`, the run fails: delete the release and tag, fix `Chart.yaml`, and try again.
 
+**Registry cleanup.** `.github/workflows/ghcr-cleanup.yaml` runs every Sunday. It keeps `latest`, every tag containing a dot (`0.2.1`, `0.2`, `0.3.0-rc.1`, `8.18.0`, `8.18.0-<sha>`, `8.18.0-<YYYYMMDD>`) and the newest 20 `<sha>`-only tags per image, and deletes the rest, including untagged leftovers (never manifests still referenced by a kept image). Run it from the Actions tab with **dry run** (the default for manual runs) to preview.
+
 ### Upgrading
 
 `helm upgrade` never updates CRDs (Helm only creates them on the first install), so a new schema has to be applied separately and **before** the new operator starts.
