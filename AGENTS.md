@@ -56,7 +56,7 @@ update that section in the same change. Never document a field as working unless
 | `internal/controller/ca_client.go`, `puppetdb_client.go`, `git_poller.go` | HTTP clients and PKI helpers |
 | `charts/voxkube-operator/` | Helm chart (CRDs copied from `config/crd/bases`) |
 | `images/` | Container images (UBI 9 + Vox Pupuli RPMs) |
-| `site/`, `hack/gen-site.py` | GitHub Pages site: landing page, README renderer, and an API explorer generated from `config/crd/bases` (never hand-edit API data; it comes from the CRDs) |
+| `site/`, `hack/gen-site.py` | GitHub Pages site: landing page, README renderer, and an API explorer generated from `config/crd/bases` (never hand-edit API data; it comes from the CRDs). Deployed only from the latest release tag, so site changes go live with the next release |
 
 ## Rules
 
