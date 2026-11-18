@@ -77,6 +77,8 @@ update that section in the same change. Never document a field as working unless
 9. Operator releases follow SemVer (README → "Versioning & Releases"). Add user-visible changes to the
    `[Unreleased]` section of `CHANGELOG.md` in the same PR. Only the owner tags releases; a release PR bumps
    `version` and `appVersion` in `Chart.yaml` together (a test enforces that they are equal).
+10. CI publishes images only for `v*` tags (releases and pre-releases) and from the weekly OpenVox rebuild;
+    pushes to `main` run lint and tests only. Don't add image pushes to `main` builds.
 
 ## Known limitations / backlog
 

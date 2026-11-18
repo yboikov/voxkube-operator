@@ -83,14 +83,7 @@ helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-ope
   --create-namespace
 ```
 
-From a checkout of `main` (unreleased code), pin the operator image to a commit:
-
-```bash
-helm upgrade --install voxkube-operator ./charts/voxkube-operator \
-  --namespace openvox \
-  --create-namespace \
-  --set image.tag=<short git sha>   # every main build is pushed as ghcr.io/yboikov/voxkube-operator:<sha>
-```
+To try unreleased code, publish a **pre-release** (e.g. `v0.3.0-rc.1`, see [Releasing](#versioning--releases)) and install it with `--version 0.3.0-rc.1`. Pushes to `main` don't publish images.
 
 Check what is running with `kubectl -n openvox logs deploy/voxkube-operator | head -1`, which prints the operator version, commit and default OpenVox images.
 
@@ -840,13 +833,16 @@ The OpenVox packages inside the images are pinned to exact versions:
 
 The build fails if the installed version differs from the pin. The installed package list is in `/usr/share/voxkube/openvox-packages.txt` inside each image, and in the `org.opencontainers.image.version` label.
 
-Tags pushed from `main` for each OpenVox image:
+Tags of each OpenVox image:
 
-| Tag | Example | Mutable? |
-|---|---|---|
-| `<version>` | `8.18.0` | Moves when the image is rebuilt (e.g. base image updates) for the same OpenVox version. |
-| `<version>-<sha>` | `8.18.0-1a2b3c4` | **Immutable.** Use this, or a digest, for production GitOps. |
-| `<sha>`, `latest` | | `latest` follows `main`. |
+| Tag | Example | Pushed by | Mutable? |
+|---|---|---|---|
+| `<version>` | `8.18.0` | releases, the weekly rebuild | Moves to the newest build of that OpenVox version (the chart uses this tag). |
+| `<version>-<sha>` | `8.18.0-1a2b3c4` | releases and pre-releases | **Immutable.** The image built for that release commit. |
+| `<version>-<YYYYMMDD>` | `8.18.0-20261123` | the weekly rebuild | **Immutable.** The latest release rebuilt with base-image fixes (UBI, Java, openssl). |
+| `<sha>` | `1a2b3c4` | releases and pre-releases | – |
+
+Use an immutable tag or a digest for production GitOps. The weekly rebuild (Mondays) only rebuilds the OpenVox images of the latest release; the operator image is rebuilt only by releases.
 
 Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release appears, updating every location above. It never proposes 9.x, because the images use the `openvox8` repository. Keep the server and DB on the same version. Pull requests build the images (no push), so a bad pin fails before merge.
 
@@ -864,10 +860,19 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 
 | Artifact | Versioned as |
 |---|---|
-| Operator image `ghcr.io/yboikov/voxkube-operator` | `0.1.0`, `0.1` (releases); `<sha>` and `latest` (every `main` build) |
-| Helm chart `oci://ghcr.io/yboikov/charts/voxkube-operator` | `0.1.0`. The chart `version` always equals `appVersion`, so a chart release installs the same operator release. |
-| Operator binary | `--version` and the first log line show version, commit and build date; `dev` for local builds. Unreleased `main` builds report `<chart version>-dev.<sha>`. |
+| Operator image `ghcr.io/yboikov/voxkube-operator` | Releases: `0.2.0`, `0.2`, `latest`, `<sha>`. Pre-releases: `0.3.0-rc.1`, `<sha>` (they never move `0.3` or `latest`). |
+| Helm chart `oci://ghcr.io/yboikov/charts/voxkube-operator` | `0.2.0`, or `0.3.0-rc.1` for pre-releases. The chart `version` always equals `appVersion`, so a chart release installs the same operator release. |
+| Operator binary | `--version` and the first log line show version, commit and build date; `dev` for local builds. |
 | OpenVox images | Pinned to the OpenVox version, independent of the operator version (see [Image versions](#image-versions)). |
+
+**What CI does**
+
+| Event | Result |
+|---|---|
+| Pull request | Lint, tests, and all images built **without pushing** (a bad version pin fails here). |
+| Push to `main` | Lint and tests only. No images. |
+| Release / pre-release (`v*` tag) | Images built and pushed, chart pushed, files attached to the GitHub Release. |
+| Weekly (Monday) | OpenVox images of the latest release rebuilt for base-image security fixes. |
 
 **Releasing**
 
@@ -875,6 +880,7 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 2. Create the release, either way:
    - **GitHub UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.2.0` → *Create new tag on publish*, target `main` → *Generate release notes* → *Publish release*.
    - **CLI:** `git tag -a v0.2.0 -m "VoxKube v0.2.0" && git push origin v0.2.0` (CI creates the release itself).
+   - **Pre-release** (to test unreleased code): same, with a tag like `v0.3.0-rc.1` and *Set as a pre-release* ticked. `Chart.yaml` doesn't need to change; the chart is packaged as `0.3.0-rc.1`.
 3. CI builds and pushes the images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and attaches the chart package and `voxkube-crds.yaml` to the release (creating it with generated notes if it doesn't exist yet). If the tag doesn't match `Chart.yaml`, the run fails: delete the release and tag, fix `Chart.yaml`, and try again.
 
 Helm does not upgrade CRDs. After upgrading the chart, apply the new CRDs: `kubectl apply --server-side -f https://github.com/yboikov/voxkube-operator/releases/download/v0.2.0/voxkube-crds.yaml`.
