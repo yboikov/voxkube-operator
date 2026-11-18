@@ -952,7 +952,7 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 | Push to `main` | Lint and tests only. No images. |
 | Release / pre-release (`v*` tag) | Operator image built and pushed. OpenVox images rebuilt only if `images/<image>/` changed since the previous release or the version tag doesn't exist yet; otherwise the existing image just gets the new tags. Chart pushed, files attached to the GitHub Release. |
 | Weekly (Monday) | OpenVox images of the latest release rebuilt for base-image security fixes. |
-| Push to `main` touching the site, README or CRDs; release published | Docs site rebuilt and deployed to GitHub Pages (`.github/workflows/pages.yaml`). |
+| Release published (not pre-releases) | Docs site rebuilt **from that release's tag** and deployed to GitHub Pages (`.github/workflows/pages.yaml`), so the docs match what `helm install` gives you. Run the workflow by hand to rebuild it from the latest release. |
 
 **Releasing**
 

@@ -8,6 +8,9 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Changed
+- The docs site is built from the latest release instead of `main`, so it always matches the released version.
+
 ## [0.2.4]
 
 ### Fixed
