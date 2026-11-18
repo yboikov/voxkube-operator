@@ -12,13 +12,13 @@
 
 VoxKube runs your Puppet infrastructure on Kubernetes or OpenShift. It uses [OpenVox](https://voxpupuli.org/openvox/), the community fork of Puppet 8, and is driven entirely by YAML.
 
+Traditionally, a Puppet server lives on hand-built VMs. You sign each new machine's certificate by hand on the CA, keep machine roles in a separate tool such as Foreman, scatter secrets across encrypted Hiera files, and maintain a separate list of machines for monitoring. VoxKube replaces all of that with three Kubernetes resources. You describe the Puppet server, the machines it manages and what to monitor; the operator builds and runs everything, and keeps it that way. Approving a new machine, giving it a role, handing it a TLS certificate, muting its alerts or retiring it is a change to one YAML file, so it all fits into Git and ArgoCD like the rest of your cluster.
+
 > [!TIP]
 > **Built for OpenShift.** Every pod runs under the default `restricted-v2` SCC (no root, no fixed UIDs), and **OpenShift Routes are included**: set `openShiftRoute.enabled: true` and the operator creates passthrough Routes for the compilers and the CA, adds their hostnames to the certificates, and reports the URLs agents should use in the `VoxCluster` status (`serverExternalURL`, `caExternalURL`). Agents outside the cluster connect on port 443, with no LoadBalancer or NodePort needed.
 
 > [!TIP]
-> **Puppet code straight from Git, with GitHub App authentication.** Set `code.mode: git` and point it at your control repo: every branch becomes a Puppet environment, deployed by g10k together with its `Puppetfile` modules. Authenticate as a **GitHub App** (the operator exchanges the App's private key for short-lived installation tokens and renews them itself, so there are no personal tokens or deploy keys to rotate), or with an SSH key or HTTPS token. The operator polls the repository, so no inbound webhook through your firewall is needed, and rolls the compilers when a branch changes.
-
-Traditionally, a Puppet server lives on hand-built VMs. You sign each new machine's certificate by hand on the CA, keep machine roles in a separate tool such as Foreman, scatter secrets across encrypted Hiera files, and maintain a separate list of machines for monitoring. VoxKube replaces all of that with three Kubernetes resources. You describe the Puppet server, the machines it manages and what to monitor; the operator builds and runs everything, and keeps it that way. Approving a new machine, giving it a role, handing it a TLS certificate, muting its alerts or retiring it is a change to one YAML file, so it all fits into Git and ArgoCD like the rest of your cluster.
+> **Puppet code straight from Git, with GitHub App authentication.** Set `code.mode: git` and point it at your control repo: every branch becomes a Puppet environment, deployed by g10k together with its `Puppetfile` modules. Authenticate as a **GitHub App** (the operator exchanges the App's private key for short-lived installation tokens and renews them itself, so there are no personal tokens or deploy keys to rotate), or with an SSH key or HTTPS token. The operator polls the repository, so no inbound webhook through your firewall is needed, and updates the compilers when a branch changes.
 
 ## The components
 
