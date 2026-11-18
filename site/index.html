@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoxKube: OpenVox (Puppet 8) on Kubernetes and OpenShift</title>
+<meta name="description" content="An operator that runs OpenVox, the open-source Puppet 8, on Kubernetes and OpenShift: CA, compilers, PuppetDB, Git code deployment and Prometheus discovery, all from YAML.">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/site.css">
+<script type="module" src="assets/app.js"></script>
+</head>
+<body data-page="landing">
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="26" height="26">VoxKube</a>
+    <nav class="nav" aria-label="Site">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="docs.html">Docs</a>
+      <a href="api.html">API reference</a>
+      <a href="https://github.com/yboikov/voxkube-operator">GitHub</a>
+    </nav>
+    <span class="version" data-version></span>
+  </div>
+</header>
+
+<main id="content">
+<div class="wrap">
+  <section class="hero">
+    <div>
+      <h1>Puppet, run by Kubernetes.</h1>
+      <p class="lead">VoxKube is an operator for <a href="https://voxpupuli.org/openvox/">OpenVox</a>, the open-source Puppet&nbsp;8. Describe your Puppet server and the machines it manages in YAML; the operator runs the CA, the compilers and PuppetDB, deploys your code from Git, and keeps it all that way.</p>
+      <div class="install">
+        <pre id="install"><span class="prompt">$ </span>helm upgrade --install voxkube-operator \
+    oci://ghcr.io/yboikov/charts/voxkube-operator \
+    --namespace openvox --create-namespace</pre>
+        <button class="copy" data-copy="install">Copy</button>
+      </div>
+      <div class="hero-links">
+        <a href="docs.html#5-minute-quickstart">Read the quickstart</a>
+        <a href="api.html">Browse the API</a>
+        <a href="https://github.com/yboikov/voxkube-operator">Source on GitHub</a>
+      </div>
+    </div>
+    <figure class="manifest" aria-label="Example VoxCluster manifest with links to each field's reference">
+      <figcaption class="manifest-head"><span>voxcluster.yaml</span><span>Point at a field to read its spec</span></figcaption>
+      <pre class="manifest-body" id="manifest" data-kind="VoxCluster">apiVersion: voxkube.io/v1alpha1
+kind: VoxCluster
+metadata:
+  name: production
+  namespace: openvox
+spec:
+  code:
+    mode: git
+    git:
+      remote: https://github.com/acme/puppet-control.git
+      authType: githubApp
+      githubApp:
+        appID: 123456
+        installationID: 98765432
+        privateKeySecretRef:            # synced from your vault by ESO
+          name: github-app
+          key: private-key.pem
+      pollInterval: 60s
+  ca:
+    autosignMode: voxnode               # approve machines with VoxNode
+  server:
+    replicas: 2
+    autoscaling:
+      enabled: true
+      maxReplicas: 6
+  database:
+    postgres:
+      mode: external                    # e.g. CloudNativePG
+      host: openvox-pg-rw
+      credentialsSecretRef: openvox-pg-app
+  networking:
+    server:
+      externalHostname: puppet.example.com
+      openShiftRoute:
+        enabled: true
+    ca:
+      externalHostname: puppet-ca.example.com
+      openShiftRoute:
+        enabled: true</pre>
+      <div class="peek" id="peek" aria-live="polite"></div>
+    </figure>
+  </section>
+
+  <section class="section" aria-labelledby="h-resources">
+    <h2 id="h-resources">Three resources, one installation</h2>
+    <p class="intro">Everything is configured through three custom resources. Each one is a YAML file you can keep in Git.</p>
+    <div class="resources">
+      <div class="resource">
+        <a class="resource-kind" href="api.html#VoxCluster">VoxCluster<small>kubectl get vc</small></a>
+        <div class="resource-is">The Puppet server</div>
+        <p>Creates and runs the whole OpenVox stack: a CA, a pool of stateless compilers, OpenVox DB (PuppetDB) on your PostgreSQL, and your control repo deployed from Git. One per Puppet installation.</p>
+      </div>
+      <div class="resource">
+        <a class="resource-kind" href="api.html#VoxNode">VoxNode<small>kubectl get vn</small></a>
+        <div class="resource-is">One managed machine</div>
+        <p>Approves the machine's certificate and decides what Puppet applies to it. It can also hand the machine TLS certificates from cert-manager and secrets through Hiera, mute its alerts, and retire it cleanly.</p>
+      </div>
+      <div class="resource">
+        <a class="resource-kind" href="api.html#VoxDiscovery">VoxDiscovery<small>kubectl get vd</small></a>
+        <div class="resource-is">Machines for Prometheus</div>
+        <p>Asks OpenVox DB which machines exist, for example every machine that runs <code>profile::node_exporter</code>, and publishes them as Prometheus targets with labels like their Puppet role.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="h-join">
+    <h2 id="h-join">How a machine joins</h2>
+    <p class="intro">From a fresh VM to a monitored, configured machine, without logging in to the CA.</p>
+    <ol class="steps">
+      <li><h3>The agent asks for a certificate</h3><p>The new machine sends a certificate request to the CA.</p></li>
+      <li><h3>A VoxNode appears</h3><p>The operator creates a <code>VoxNode</code> waiting for approval, unless you added one to Git first.</p></li>
+      <li><h3>You approve it</h3><p>Set <code>state: Active</code> and the machine's role. The operator signs the certificate.</p></li>
+      <li><h3>Puppet configures it</h3><p>The agent gets its catalog from the compilers, built from your Git code and the VoxNode's role.</p></li>
+      <li><h3>OpenVox DB knows it</h3><p>Facts and run reports land in PuppetDB; the VoxNode shows the last run.</p></li>
+      <li><h3>Prometheus scrapes it</h3><p>A <code>VoxDiscovery</code> picks the machine up and publishes it as a scrape target.</p></li>
+    </ol>
+  </section>
+
+  <section class="section" aria-labelledby="h-fit">
+    <h2 id="h-fit">Made for OpenShift and GitOps</h2>
+    <div class="pair">
+      <div>
+        <h3>OpenShift Routes included</h3>
+        <p>Every pod runs under the default <code>restricted-v2</code> SCC. Turn on a Route and the operator creates a TLS-passthrough Route for the compilers or the CA, adds the hostname to the certificate and reports the URL agents should use. Agents outside the cluster connect on port 443.</p>
+<pre class="snippet"><span class="k">networking</span>:
+  <span class="k">server</span>:
+    <span class="k">externalHostname</span>: <span class="v">puppet.example.com</span>
+    <span class="k">openShiftRoute</span>:
+      <span class="k">enabled</span>: <span class="v">true</span></pre>
+      </div>
+      <div>
+        <h3>Code from Git, as a GitHub App</h3>
+        <p>Every branch of your control repo becomes a Puppet environment, deployed with g10k. Authenticate as a GitHub App, and the operator renews its short-lived tokens itself; SSH keys and HTTPS tokens work too. The operator polls Git, so no webhook has to get through your firewall.</p>
+<pre class="snippet"><span class="k">code</span>:
+  <span class="k">mode</span>: <span class="v">git</span>
+  <span class="k">git</span>:
+    <span class="k">authType</span>: <span class="v">githubApp</span>   <span class="c"># or sshKey, httpsToken</span></pre>
+      </div>
+    </div>
+  </section>
+</div>
+</main>
+<footer class="footer">
+  <div class="wrap">
+    <span>Vibe-coded: everything in this repository was written by AI, with no human edits.</span>
+    <span><a href="https://github.com/yboikov/voxkube-operator/blob/main/LICENSE">Apache 2.0</a> &nbsp; <a href="https://github.com/yboikov/voxkube-operator/releases">Releases</a> &nbsp; <a href="https://github.com/yboikov/voxkube-operator/blob/main/SECURITY.md">Security</a></span>
+  </div>
+</footer>
+</body>
+</html>

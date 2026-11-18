@@ -1,0 +1,55 @@
+name: Docs site
+
+# Builds the GitHub Pages site (site/ + README.md + an API explorer generated from the CRDs) and deploys it.
+# Needs Settings → Pages → Source: "GitHub Actions".
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - README.md
+      - config/crd/bases/**
+      - hack/gen-site.py
+      - charts/voxkube-operator/Chart.yaml
+      - .github/workflows/pages.yaml
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the site
+        run: |
+          pip install pyyaml
+          python hack/gen-site.py _site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
