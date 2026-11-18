@@ -2,8 +2,8 @@ apiVersion: v2
 name: voxkube-operator
 description: VoxKube - OpenShift & Kubernetes-native Operator for OpenVox and Puppet
 type: application
-version: 0.2.2
-appVersion: "0.2.2"
+version: 0.2.3
+appVersion: "0.2.3"
 home: https://github.com/yboikov/voxkube-operator
 keywords:
   - voxkube

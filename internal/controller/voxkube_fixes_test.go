@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	openvoxv1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
@@ -581,32 +582,32 @@ func TestDiscoveryEndpointLabels(t *testing.T) {
 		"monitoring.voxkube.io/env":    "dev",        // owned by targetLabels: skipped
 		"app.kubernetes.io/name":       "ignored",
 	})
-	topo, skipped := endpointTopology(disc, node, vnLabels)
+	topo, skipped := endpointTargetLabels(disc, node, vnLabels)
 	want := map[string]string{
-		"label.voxkube.io/role":   "web-canary",
-		"label.voxkube.io/os":     "RedHat",
-		"label.voxkube.io/alerts": "false",
+		"role":   "web-canary",
+		"os":     "RedHat",
+		"alerts": "false",
 	}
 	if len(topo) != len(want) {
 		t.Fatalf("expected %v, got %v", want, topo)
 	}
 	for k, v := range want {
 		if topo[k] != v {
-			t.Errorf("topology[%s] = %q, want %q", k, topo[k], v)
+			t.Errorf("labels[%s] = %q, want %q", k, topo[k], v)
 		}
 	}
 	if skipped != 2 {
 		t.Errorf("expected 2 skipped labels (invalid fact value, env owned by targetLabels), got %d", skipped)
 	}
 
-	if topo, _ := endpointTopology(disc, DiscoveredPuppetNode{Certname: "bare"}, nil); topo != nil {
-		t.Errorf("node without facts or VoxNode labels must have no topology, got %v", topo)
+	if topo, _ := endpointTargetLabels(disc, DiscoveredPuppetNode{Certname: "bare"}, nil); topo != nil {
+		t.Errorf("node without facts or VoxNode labels must have no labels, got %v", topo)
 	}
 
 	ep := buildServiceMonitorSpec(disc, "")["endpoints"].([]interface{})[0].(map[string]interface{})
 	rls := ep["relabelings"].([]interface{})
 	lm := rls[len(rls)-1].(map[string]interface{})
-	if lm["action"] != "labelmap" || lm["regex"] != "__meta_kubernetes_endpointslice_endpoint_topology_label_voxkube_io_(.+)" {
+	if lm["action"] != "labelmap" || lm["regex"] != "__meta_kubernetes_endpointslice_label_label_voxkube_io_(.+)" {
 		t.Errorf("expected labelmap for per-target labels, got %v", lm)
 	}
 
@@ -622,5 +623,110 @@ func TestDiscoveryEndpointLabels(t *testing.T) {
 		if err := validateDiscoveryLabels(d); err == nil {
 			t.Errorf("%s: expected %v to be rejected", name, spec)
 		}
+	}
+}
+
+// Per-target labels must end up as EndpointSlice labels: the API server silently drops endpoints' deprecatedTopology.
+func TestDiscoveryLabelsGroupEndpointSlices(t *testing.T) {
+	s := newVoxKubeScheme(t)
+	ctx := context.Background()
+	disc := &openvoxv1alpha1.VoxDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-exporter", Namespace: "openvox", UID: "disc-uid"},
+		Spec: openvoxv1alpha1.VoxDiscoverySpec{
+			ClusterRef:     "production",
+			Ports:          []openvoxv1alpha1.DiscoveryPort{{Name: "metrics", Port: 9119}},
+			EndpointLabels: map[string]string{"role": "trusted.extensions.pp_role"},
+		},
+	}
+	node := func(name, ip, role string) DiscoveredPuppetNode {
+		facts := map[string]interface{}{"networking": map[string]interface{}{"ip": ip}}
+		if role != "" {
+			facts["trusted"] = map[string]interface{}{"extensions": map[string]interface{}{"pp_role": role}}
+		}
+		return DiscoveredPuppetNode{Certname: name, Facts: facts}
+	}
+	nodes := []DiscoveredPuppetNode{
+		node("web01.example.com", "10.0.0.11", "web"),
+		node("web02.example.com", "10.0.0.12", "web"),
+		node("db01.example.com", "10.0.0.21", "db"),
+		node("bare.example.com", "10.0.0.31", ""),
+		node("web03.example.com", "fd00::13", "web"),
+	}
+	vnLabels := map[string]map[string]string{"web02.example.com": {"alerts": "false"}}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(s).WithObjects(disc).Build()
+	r := &VoxDiscoveryReconciler{Client: k8sClient, Scheme: s}
+	count, slices, skipped, err := r.reconcileEndpointSlices(ctx, disc, "node-exporter", nodes, map[string]bool{}, vnLabels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// groups: {} → bare; {role=db}; {role=web} → web01 (v4) + web03 (v6); {role=web,alerts=false} → web02
+	if count != 5 || slices != 5 || skipped != 0 {
+		t.Fatalf("expected 5 endpoints in 5 slices, 0 skipped; got %d, %d, %d", count, slices, skipped)
+	}
+
+	list := &discoveryv1.EndpointSliceList{}
+	if err := k8sClient.List(ctx, list, client.InNamespace("openvox")); err != nil {
+		t.Fatal(err)
+	}
+	byNode := map[string]discoveryv1.EndpointSlice{}
+	for _, sl := range list.Items {
+		for _, ep := range sl.Endpoints {
+			if ep.DeprecatedTopology != nil {
+				t.Errorf("slice %s must not use deprecatedTopology", sl.Name)
+			}
+			byNode[*ep.NodeName] = sl
+		}
+	}
+	check := func(certname string, want map[string]string, wantName string) {
+		t.Helper()
+		sl, ok := byNode[certname]
+		if !ok {
+			t.Fatalf("%s not exported", certname)
+		}
+		if wantName != "" && sl.Name != wantName {
+			t.Errorf("%s: slice name %q, want %q", certname, sl.Name, wantName)
+		}
+		got := map[string]string{}
+		for k, v := range sl.Labels {
+			if name, ok := strings.CutPrefix(k, "label.voxkube.io/"); ok {
+				got[name] = v
+			}
+		}
+		if len(got) != len(want) {
+			t.Errorf("%s: target labels %v, want %v", certname, got, want)
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Errorf("%s: label %s=%q, want %q", certname, k, got[k], v)
+			}
+		}
+		if sl.Labels[discoveryv1.LabelServiceName] != "node-exporter" {
+			t.Errorf("%s: slice %s lost its service-name label", certname, sl.Name)
+		}
+	}
+	check("bare.example.com", map[string]string{}, "node-exporter-0")
+	check("db01.example.com", map[string]string{"role": "db"}, "")
+	check("web01.example.com", map[string]string{"role": "web"}, "")
+	check("web02.example.com", map[string]string{"role": "web", "alerts": "false"}, "")
+	check("web03.example.com", map[string]string{"role": "web"}, "")
+	if byNode["web01.example.com"].Name == byNode["web02.example.com"].Name {
+		t.Error("different label sets must not share a slice")
+	}
+	if byNode["web03.example.com"].AddressType != discoveryv1.AddressTypeIPv6 {
+		t.Error("IPv6 endpoint must be in an IPv6 slice")
+	}
+
+	// Unmuting web02 moves it back to the role=web group and prunes its old slice.
+	oldSlice := byNode["web02.example.com"].Name
+	if _, slices, _, err = r.reconcileEndpointSlices(ctx, disc, "node-exporter", nodes, map[string]bool{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if slices != 4 {
+		t.Errorf("expected 4 slices after unmuting, got %d", slices)
+	}
+	gone := &discoveryv1.EndpointSlice{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: oldSlice}, gone); err == nil {
+		t.Errorf("slice %s of the old label group must be pruned", oldSlice)
 	}
 }
