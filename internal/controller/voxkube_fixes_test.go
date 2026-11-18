@@ -384,6 +384,25 @@ func TestVoxCluster_GitSidecarModeAndPSKRequiresSecret(t *testing.T) {
 	if !hasSSH {
 		t.Error("expected the SSH deploy key to be mounted into the g10k sidecar")
 	}
+	hasRemote := false
+	for _, e := range sidecar.Env {
+		if e.Name == "VOXKUBE_GIT_REMOTE" && e.Value == "git@github.com:myorg/control.git" {
+			hasRemote = true
+		}
+	}
+	if !hasRemote {
+		t.Error("the sidecar needs VOXKUBE_GIT_REMOTE to check for moved branches")
+	}
+	g10kCM := &corev1.ConfigMap{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "ovx", Name: "prod-g10k"}, g10kCM); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(g10kCM.Data["sidecar.sh"], "deploy.sh --if-changed") {
+		t.Error("the sidecar must redeploy only when a branch moved (deploy.sh --if-changed)")
+	}
+	if !strings.Contains(g10kCM.Data["deploy.sh"], "git ls-remote --heads") || !strings.Contains(g10kCM.Data["deploy.sh"], ".voxkube-deployed-refs") {
+		t.Error("deploy.sh must record the deployed branch heads")
+	}
 
 	// psk without a Secret is a spec error that must surface as Phase=Error
 	latest := &openvoxv1alpha1.VoxCluster{}

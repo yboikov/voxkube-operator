@@ -8,6 +8,14 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.4]
+
+### Fixed
+- `synchronizedRollout: false` (and SSH remotes): the `g10k-sync` sidecar ran a full g10k deployment and
+  `puppet generate types` every `pollInterval`, even when nothing had changed. It now checks the branch heads
+  with `git ls-remote` and redeploys only when one moved, plus once an hour for Puppetfile modules that track
+  a branch. "g10k deployment finished" is logged only for real deployments.
+
 ### Added
 - Docs site on GitHub Pages: overview, the README, and an interactive API explorer generated from the CRDs
   (search, permalinks to every field, types, defaults and validation).
@@ -102,7 +110,8 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/yboikov/voxkube-operator/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yboikov/voxkube-operator/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...v0.2.1
