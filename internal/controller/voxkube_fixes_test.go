@@ -470,3 +470,41 @@ func TestVoxDiscovery_DatabaseDisabledRemovesSlices(t *testing.T) {
 		t.Errorf("expected Ready=False/DatabaseDisabled and no slices, got %+v / %+v", c, got.Status)
 	}
 }
+
+func TestServiceMonitorUsesEndpointSliceRole(t *testing.T) {
+	disc := &openvoxv1alpha1.VoxDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-exporter", Namespace: "openvox"},
+		Spec: openvoxv1alpha1.VoxDiscoverySpec{
+			Ports: []openvoxv1alpha1.DiscoveryPort{{Name: "metrics", Port: 9100}},
+			ServiceMonitor: openvoxv1alpha1.DiscoveryServiceMonitorSpec{
+				Enabled: true,
+				TLS:     openvoxv1alpha1.DiscoveryTLSSpec{Enabled: true},
+			},
+		},
+	}
+	spec := buildServiceMonitorSpec(disc, "node-exporter-prometheus-scraper-tls")
+	if spec["serviceDiscoveryRole"] != "EndpointSlice" {
+		t.Fatalf("operator only writes EndpointSlices, ServiceMonitor must use that role, got %v", spec["serviceDiscoveryRole"])
+	}
+	eps := spec["endpoints"].([]interface{})
+	ep := eps[0].(map[string]interface{})
+	if ep["port"] != "metrics" || ep["interval"] != "30s" || ep["scheme"] != "https" {
+		t.Errorf("unexpected endpoint: %v", ep)
+	}
+	rl := ep["relabelings"].([]interface{})[0].(map[string]interface{})
+	src := rl["sourceLabels"].([]interface{})[0]
+	if src != "__meta_kubernetes_endpointslice_endpoint_node_name" || rl["targetLabel"] != "instance" || rl["regex"] != "(.+)" {
+		t.Errorf("instance relabeling must read the EndpointSlice node name, got %v", rl)
+	}
+
+	off := false
+	disc.Spec.ServiceMonitor.PreserveNodeHostnameAsInstance = &off
+	disc.Spec.ServiceMonitor.TLS.Enabled = false
+	ep = buildServiceMonitorSpec(disc, "")["endpoints"].([]interface{})[0].(map[string]interface{})
+	if _, ok := ep["relabelings"]; ok {
+		t.Error("relabelings must be omitted when preserveNodeHostnameAsInstance is false")
+	}
+	if _, ok := ep["scheme"]; ok {
+		t.Error("scheme must be omitted without TLS")
+	}
+}

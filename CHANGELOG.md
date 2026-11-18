@@ -8,6 +8,15 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.2]
+
+### Fixed
+- `VoxDiscovery` ServiceMonitor found no targets: the operator publishes targets only as EndpointSlices, but
+  Prometheus Operator discovers through Endpoints by default. The ServiceMonitor now sets
+  `serviceDiscoveryRole: EndpointSlice`, and the `instance` relabeling reads
+  `__meta_kubernetes_endpointslice_endpoint_node_name`. Prometheus needs read access to `endpointslices`.
+- ServiceMonitor update errors are no longer ignored.
+
 ## [0.2.1]
 
 ### Fixed
@@ -67,7 +76,8 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yboikov/voxkube-operator/releases/tag/v0.1.0

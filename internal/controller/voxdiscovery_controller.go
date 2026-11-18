@@ -436,6 +436,38 @@ func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
 	}
 	smObj.SetLabels(labels)
 
+	smObj.Object["spec"] = buildServiceMonitorSpec(disc, scraperSecName)
+
+	if err := controllerutil.SetControllerReference(disc, smObj, r.Scheme); err != nil {
+		return scraperSecName, err
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(smObj.GroupVersionKind())
+	err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, existing)
+	if apierrors.IsNotFound(err) {
+		if createErr := r.Create(ctx, smObj); createErr != nil {
+			if !meta.IsNoMatchError(createErr) && !strings.Contains(createErr.Error(), "no matches for kind \"ServiceMonitor\"") {
+				return scraperSecName, createErr
+			}
+		}
+	} else if err == nil {
+		smObj.SetResourceVersion(existing.GetResourceVersion())
+		if updErr := r.Update(ctx, smObj); updErr != nil {
+			return scraperSecName, updErr
+		}
+	}
+	// Any other Get error (typically: ServiceMonitor CRD not installed) leaves monitoring disabled.
+
+	return scraperSecName, nil
+}
+
+// buildServiceMonitorSpec renders the ServiceMonitor spec for a VoxDiscovery.
+//
+// The operator publishes targets only as EndpointSlices (the headless Service has no selector, and Kubernetes
+// never mirrors EndpointSlices back into Endpoints), so the ServiceMonitor must use the EndpointSlice discovery
+// role. Prometheus Operator defaults to the Endpoints role, which would find zero targets.
+func buildServiceMonitorSpec(disc *openvoxv1alpha1.VoxDiscovery, scraperSecName string) map[string]interface{} {
 	interval := disc.Spec.ServiceMonitor.Interval
 	if interval == "" {
 		interval = "30s"
@@ -453,10 +485,14 @@ func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
 			"scrapeTimeout": scrapeTimeout,
 		}
 		if disc.Spec.ServiceMonitor.PreserveNodeHostnameAsInstance == nil || *disc.Spec.ServiceMonitor.PreserveNodeHostnameAsInstance {
+			// nodeName on each endpoint is the Puppet certname; only a non-empty value replaces the default
+			// instance (<ip>:<port>).
 			ep["relabelings"] = []interface{}{
 				map[string]interface{}{
-					"sourceLabels": []interface{}{"__meta_kubernetes_endpoint_node_name"},
+					"sourceLabels": []interface{}{"__meta_kubernetes_endpointslice_endpoint_node_name"},
+					"regex":        "(.+)",
 					"targetLabel":  "instance",
+					"replacement":  "$1",
 					"action":       "replace",
 				},
 			}
@@ -464,22 +500,9 @@ func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
 		if disc.Spec.ServiceMonitor.TLS.Enabled && scraperSecName != "" {
 			ep["scheme"] = "https"
 			ep["tlsConfig"] = map[string]interface{}{
-				"ca": map[string]interface{}{
-					"secret": map[string]interface{}{
-						"name": scraperSecName,
-						"key":  "ca.crt",
-					},
-				},
-				"cert": map[string]interface{}{
-					"secret": map[string]interface{}{
-						"name": scraperSecName,
-						"key":  "tls.crt",
-					},
-				},
-				"keySecret": map[string]interface{}{
-					"name": scraperSecName,
-					"key":  "tls.key",
-				},
+				"ca":        map[string]interface{}{"secret": map[string]interface{}{"name": scraperSecName, "key": "ca.crt"}},
+				"cert":      map[string]interface{}{"secret": map[string]interface{}{"name": scraperSecName, "key": "tls.crt"}},
+				"keySecret": map[string]interface{}{"name": scraperSecName, "key": "tls.key"},
 			}
 		}
 		smEndpoints = append(smEndpoints, ep)
@@ -490,32 +513,11 @@ func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
 		matchLabels[k] = v
 	}
 
-	smObj.Object["spec"] = map[string]interface{}{
-		"selector": map[string]interface{}{
-			"matchLabels": matchLabels,
-		},
-		"endpoints": smEndpoints,
+	return map[string]interface{}{
+		"serviceDiscoveryRole": "EndpointSlice",
+		"selector":             map[string]interface{}{"matchLabels": matchLabels},
+		"endpoints":            smEndpoints,
 	}
-
-	if err := controllerutil.SetControllerReference(disc, smObj, r.Scheme); err != nil {
-		return scraperSecName, err
-	}
-
-	existing := &unstructured.Unstructured{}
-	existing.SetGroupVersionKind(smObj.GroupVersionKind())
-	err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, existing)
-	if apierrors.IsNotFound(err) {
-		if createErr := r.Create(ctx, smObj); createErr != nil {
-			if !meta.IsNoMatchError(createErr) && !strings.Contains(createErr.Error(), "no matches for kind \"ServiceMonitor\"") {
-				return scraperSecName, createErr
-			}
-		}
-	} else if err == nil {
-		smObj.SetResourceVersion(existing.GetResourceVersion())
-		_ = r.Update(ctx, smObj)
-	}
-
-	return scraperSecName, nil
 }
 
 func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(
