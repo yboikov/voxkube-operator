@@ -78,19 +78,12 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.1.0 \
+  --version 0.2.1 \
   --namespace openvox \
   --create-namespace
 ```
 
-From a checkout of `main` (unreleased code), pin the operator image to a commit:
-
-```bash
-helm upgrade --install voxkube-operator ./charts/voxkube-operator \
-  --namespace openvox \
-  --create-namespace \
-  --set image.tag=<short git sha>   # every main build is pushed as ghcr.io/yboikov/voxkube-operator:<sha>
-```
+To try unreleased code, publish a **pre-release** (e.g. `v0.3.0-rc.1`, see [Releasing](#versioning--releases)) and install it with `--version 0.3.0-rc.1`. Pushes to `main` don't publish images.
 
 Check what is running with `kubectl -n openvox logs deploy/voxkube-operator | head -1`, which prints the operator version, commit and default OpenVox images.
 
@@ -119,8 +112,10 @@ spec:
     postgres:
       mode: builtin # ephemeral, dev/demo only; use mode: external (e.g. CloudNativePG) in production
   networking:
-    externalHostname: puppet.example.com
-    serviceType: ClusterIP
+    server:
+      externalHostname: puppet.example.com
+    ca:
+      externalHostname: puppet-ca.example.com
 ```
 
 Check the deployed pods and services:
@@ -323,7 +318,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `ca` | [`ClusterCASpec`](#voxclusterspecca) | no | Dedicated OpenVox CA. |
 | `server` | [`ClusterServerSpec`](#voxclusterspecserver) | no | Compiler pool. Also supplies the image and pod security context for the CA. |
 | `database` | [`ClusterDatabaseSpec`](#voxclusterspecdatabase) | no | OpenVox DB and PostgreSQL. |
-| `networking` | [`ClusterNetworkingSpec`](#voxclusterspecnetworking) | no | Service type, TLS SANs, OpenShift Route. |
+| `networking` | [`ClusterNetworkingSpec`](#voxclusterspecnetworking) | no | Exposure of the compilers (`server`) and the CA (`ca`): hostnames, Service types, OpenShift Routes. |
 | `hieraSecrets` | [`HieraSecretsSpec`](#voxclusterspechierasecrets) | no | Secret to Hiera bridge. |
 | `workflows` | [`ClusterWorkflowsSpec`](#voxclusterspecworkflows) | no | ENC, metadata, reports, maintenance. |
 
@@ -469,16 +464,50 @@ spec:
 
 #### `VoxCluster.spec.networking`
 
+Two blocks with the same fields: `server` (the compilers, what agents set as `server`) and `ca` (the CA, what agents set as `ca_server`).
+
+| Field | Description |
+|---|---|
+| `server` | [`EndpointNetworkingSpec`](#voxclusterspecnetworkingserver--ca) for Service `<cluster>` (port `8140`, named `puppet`) and Route `<cluster>`. |
+| `ca` | [`EndpointNetworkingSpec`](#voxclusterspecnetworkingserver--ca) for Service `<cluster>-ca` (port `8140`, named `https-ca`) and Route `<cluster>-ca`. Ignored when `spec.ca.enabled: false`. |
+
+```yaml
+networking:
+  server:
+    externalHostname: puppet.apps.example.com
+    openShiftRoute:
+      enabled: true
+  ca:
+    externalHostname: puppet-ca.apps.example.com
+    openShiftRoute:
+      enabled: true
+```
+
+#### `VoxCluster.spec.networking.server` / `.ca`
+
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `externalHostname` | string | – | – | Added as a SAN on the service certificate, and used as the Route host when `openShiftRoute.host` is empty. |
+| `externalHostname` | string | – | – | DNS name agents use for this endpoint. Added to the certificate SANs, and used as the Route host when `openShiftRoute.host` is empty. |
 | `additionalDNSNames` | []string | – | – | Extra SANs. |
-| `serviceType` | string | `ClusterIP` | `ClusterIP` \| `NodePort` \| `LoadBalancer` | Type of Service `<cluster>` (port `8140`, named `puppet`). The CA, DB and PostgreSQL Services are always `ClusterIP`. |
-| `openShiftRoute.enabled` | bool | `false` | – | Creates a `route.openshift.io/v1` Route `<cluster>` with TLS `passthrough`. Skipped if the Route API doesn't exist. |
+| `serviceType` | string | `ClusterIP` | `ClusterIP` \| `NodePort` \| `LoadBalancer` | Type of the endpoint's Service. The DB and PostgreSQL Services are always `ClusterIP`. |
+| `openShiftRoute.enabled` | bool | `false` | – | Creates a `route.openshift.io/v1` Route with TLS `passthrough` to the endpoint's Service. Setting it back to `false` deletes the Route. Skipped if the Route API doesn't exist. |
 | `openShiftRoute.host` | string | `externalHostname` | – | Route host (also added as a SAN). |
 | `openShiftRoute.annotations` | map[string]string | – | – | Annotations on the Route. |
 
-The service certificate covers `<cluster>`, `<cluster>-ca` and `<cluster>-db` in every in-cluster form (`name`, `name.ns`, `name.ns.svc`, `name.ns.svc.cluster.local`), plus the names above. It is re-issued automatically when this list changes. The CA Service `<cluster>-ca` isn't exposed by the Route, so agents outside the Kubernetes cluster need another way to reach `ca_server`.
+The CA and the compilers share one service certificate. It covers `<cluster>`, `<cluster>-ca` and `<cluster>-db` in every in-cluster form (`name`, `name.ns`, `name.ns.svc`, `name.ns.svc.cluster.local`), plus every hostname from **both** blocks. It is re-issued automatically when this list changes, and the pods roll.
+
+The compilers run with the CA service disabled, and a passthrough Route can't route by path, so the CA needs its own hostname. Agent configuration for the example above (Routes listen on 443):
+
+```ini
+# /etc/puppetlabs/puppet/puppet.conf on the agent
+[agent]
+server     = puppet.apps.example.com
+ca_server  = puppet-ca.apps.example.com
+serverport = 443
+ca_port    = 443
+```
+
+`status.serverExternalURL` and `status.caExternalURL` show the URLs to use.
 
 #### `VoxCluster.spec.hieraSecrets`
 
@@ -511,6 +540,7 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 | `observedGeneration` | int64 | `metadata.generation` last processed. |
 | `serverURL` | string | `https://<cluster>.<ns>.svc.cluster.local:8140` |
 | `caURL` | string | `https://<cluster>-ca.<ns>.svc.cluster.local:8140`, or empty if `ca.enabled: false`. |
+| `serverExternalURL` / `caExternalURL` | string | URL for agents outside the Kubernetes cluster, derived from `networking.server` / `networking.ca`: `https://<route host>:443` with a Route, `https://<externalHostname>:<node port>` for `NodePort`, otherwise `https://<externalHostname>:8140`. Empty when the endpoint has no external hostname. |
 | `databaseURL` | string | `https://<cluster>-db.<ns>.svc.cluster.local:8081` (mTLS), or empty if the database is disabled. |
 | `caSecretName` | string | `<cluster>-ca-tls` |
 | `hieraSecretName` | string | `<cluster>-hiera-secrets`, or empty if disabled. |
@@ -538,7 +568,7 @@ All of these are labelled `app.kubernetes.io/name=voxkube`, `app.kubernetes.io/i
 | ConfigMap | `<c>-server-config` | `puppet.conf`, `puppetdb.conf`, `routes.yaml`, `enc.sh`, `enc-default.yaml`, `hiera.yaml`, … |
 | Deployment, Service | `<c>-server`, `<c>` | Compilers, port `8140`. |
 | HorizontalPodAutoscaler | `<c>-server` | `autoscaling.enabled` only. |
-| Route | `<c>` | `openShiftRoute.enabled` only. |
+| Route | `<c>`, `<c>-ca` | `networking.server.openShiftRoute.enabled` / `networking.ca.openShiftRoute.enabled` only. |
 
 Annotations set by the operator: `voxkube.io/spec-hash` on managed workloads and Services; `voxkube.io/config-hash`, `voxkube.io/tls-hash`, `voxkube.io/code-revision` and `voxkube.io/observed-commit` on pod templates.
 
@@ -803,13 +833,16 @@ The OpenVox packages inside the images are pinned to exact versions:
 
 The build fails if the installed version differs from the pin. The installed package list is in `/usr/share/voxkube/openvox-packages.txt` inside each image, and in the `org.opencontainers.image.version` label.
 
-Tags pushed from `main` for each OpenVox image:
+Tags of each OpenVox image:
 
-| Tag | Example | Mutable? |
-|---|---|---|
-| `<version>` | `8.18.0` | Moves when the image is rebuilt (e.g. base image updates) for the same OpenVox version. |
-| `<version>-<sha>` | `8.18.0-1a2b3c4` | **Immutable.** Use this, or a digest, for production GitOps. |
-| `<sha>`, `latest` | | `latest` follows `main`. |
+| Tag | Example | Pushed by | Mutable? |
+|---|---|---|---|
+| `<version>` | `8.18.0` | releases, the weekly rebuild | Moves to the newest build of that OpenVox version (the chart uses this tag). |
+| `<version>-<sha>` | `8.18.0-1a2b3c4` | releases and pre-releases | **Immutable.** The image built for that release commit. |
+| `<version>-<YYYYMMDD>` | `8.18.0-20261123` | the weekly rebuild | **Immutable.** The latest release rebuilt with base-image fixes (UBI, Java, openssl). |
+| `<sha>` | `1a2b3c4` | releases and pre-releases | – |
+
+Use an immutable tag or a digest for production GitOps. The weekly rebuild (Mondays) only rebuilds the OpenVox images of the latest release; the operator image is rebuilt only by releases.
 
 Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release appears, updating every location above. It never proposes 9.x, because the images use the `openvox8` repository. Keep the server and DB on the same version. Pull requests build the images (no push), so a bad pin fails before merge.
 
@@ -827,10 +860,19 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 
 | Artifact | Versioned as |
 |---|---|
-| Operator image `ghcr.io/yboikov/voxkube-operator` | `0.1.0`, `0.1` (releases); `<sha>` and `latest` (every `main` build) |
-| Helm chart `oci://ghcr.io/yboikov/charts/voxkube-operator` | `0.1.0`. The chart `version` always equals `appVersion`, so a chart release installs the same operator release. |
-| Operator binary | `--version` and the first log line show version, commit and build date; `dev` for local builds. Unreleased `main` builds report `<chart version>-dev.<sha>`. |
+| Operator image `ghcr.io/yboikov/voxkube-operator` | Releases: `0.2.0`, `0.2`, `latest`, `<sha>`. Pre-releases: `0.3.0-rc.1`, `<sha>` (they never move `0.3` or `latest`). |
+| Helm chart `oci://ghcr.io/yboikov/charts/voxkube-operator` | `0.2.0`, or `0.3.0-rc.1` for pre-releases. The chart `version` always equals `appVersion`, so a chart release installs the same operator release. |
+| Operator binary | `--version` and the first log line show version, commit and build date; `dev` for local builds. |
 | OpenVox images | Pinned to the OpenVox version, independent of the operator version (see [Image versions](#image-versions)). |
+
+**What CI does**
+
+| Event | Result |
+|---|---|
+| Pull request | Lint, tests, and all images built **without pushing** (a bad version pin fails here). |
+| Push to `main` | Lint and tests only. No images. |
+| Release / pre-release (`v*` tag) | Images built and pushed, chart pushed, files attached to the GitHub Release. |
+| Weekly (Monday) | OpenVox images of the latest release rebuilt for base-image security fixes. |
 
 **Releasing**
 
@@ -838,11 +880,33 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 2. Create the release, either way:
    - **GitHub UI:** Releases → *Draft a new release* → *Choose a tag* → type `v0.2.0` → *Create new tag on publish*, target `main` → *Generate release notes* → *Publish release*.
    - **CLI:** `git tag -a v0.2.0 -m "VoxKube v0.2.0" && git push origin v0.2.0` (CI creates the release itself).
+   - **Pre-release** (to test unreleased code): same, with a tag like `v0.3.0-rc.1` and *Set as a pre-release* ticked. `Chart.yaml` doesn't need to change; the chart is packaged as `0.3.0-rc.1`.
 3. CI builds and pushes the images, checks that the tag matches `Chart.yaml`, pushes the chart to `oci://ghcr.io/yboikov/charts`, and attaches the chart package and `voxkube-crds.yaml` to the release (creating it with generated notes if it doesn't exist yet). If the tag doesn't match `Chart.yaml`, the run fails: delete the release and tag, fix `Chart.yaml`, and try again.
 
-**Registry cleanup.** `.github/workflows/ghcr-cleanup.yaml` runs every Sunday. It keeps `latest`, every tag containing a dot (`0.1.0`, `0.1`, `8.18.0`, `8.18.0-<sha>`) and the newest 20 `<sha>` builds per image, and deletes the rest, including untagged leftovers (never manifests still referenced by a kept image). Run it from the Actions tab with **dry run** (the default for manual runs) to preview.
+**Registry cleanup.** `.github/workflows/ghcr-cleanup.yaml` runs every Sunday. It keeps `latest`, every tag containing a dot (`0.2.1`, `0.2`, `0.3.0-rc.1`, `8.18.0`, `8.18.0-<sha>`, `8.18.0-<YYYYMMDD>`) and the newest 20 `<sha>`-only tags per image, and deletes the rest, including untagged leftovers (never manifests still referenced by a kept image). Run it from the Actions tab with **dry run** (the default for manual runs) to preview.
 
-Helm does not upgrade CRDs. After upgrading the chart, apply the new CRDs: `kubectl apply --server-side -f https://github.com/yboikov/voxkube-operator/releases/download/v0.2.0/voxkube-crds.yaml`.
+### Upgrading
+
+`helm upgrade` never updates CRDs (Helm only creates them on the first install), so a new schema has to be applied separately and **before** the new operator starts.
+
+**With plain Helm**, for example to 0.2.0:
+
+1. Apply the release's CRDs. `--force-conflicts` is needed because Helm created them on the first install and still owns their fields:
+   ```bash
+   gh release download v0.2.0 -R yboikov/voxkube-operator -p voxkube-crds.yaml   # or download it from the release page
+   kubectl apply --server-side --force-conflicts -f voxkube-crds.yaml
+   ```
+   This only changes field ownership; existing `VoxCluster`/`VoxNode`/`VoxDiscovery` objects are untouched.
+2. Update your custom resources for any **Breaking** entries in [CHANGELOG.md](CHANGELOG.md) (0.2.0: `networking.*` moved to `networking.server.*`).
+3. Upgrade the operator:
+   ```bash
+   helm upgrade voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator --version 0.2.0 -n openvox
+   ```
+
+**With ArgoCD**, the CRDs in the chart are synced on every sync, so there's no separate step. Recommended:
+- Sync option `ServerSideApply=true`. Large CRD schemas can exceed the annotation size limit of client-side apply.
+- Don't prune CRDs (`argocd.argoproj.io/sync-options: Prune=false`, or no pruning on the app). Deleting a CRD deletes every resource of that kind.
+- Commit the chart version bump and the updated custom resources together, so they land in the same sync.
 
 ## Development & Local Testing
 

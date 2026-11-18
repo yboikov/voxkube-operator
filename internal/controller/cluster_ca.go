@@ -272,6 +272,7 @@ chmod 0640 "$SSLDIR/private_keys/${CERTNAME}.pem"
 			Labels:    voxClusterLabels(cluster.Name, "ca"),
 		},
 		Spec: corev1.ServiceSpec{
+			Type:     serviceTypeOrDefault(cluster.Spec.Networking.CA.ServiceType),
 			Selector: voxClusterLabels(cluster.Name, "ca"),
 			Ports:    []corev1.ServicePort{{Name: "https-ca", Port: 8140, TargetPort: intstr.FromInt32(8140), Protocol: corev1.ProtocolTCP}},
 		},

@@ -18,11 +18,13 @@ import (
 )
 
 const (
-	codeDir         = "/etc/puppetlabs/code"
-	g10kConfigDir   = "/etc/puppetlabs/g10k"
-	g10kAuthDir     = "/etc/puppetlabs/g10k-auth"
-	g10kSSHDir      = "/etc/puppetlabs/g10k-ssh"
-	g10kCacheDir    = "/var/cache/g10k"
+	codeDir       = "/etc/puppetlabs/code"
+	g10kConfigDir = "/etc/puppetlabs/g10k"
+	g10kAuthDir   = "/etc/puppetlabs/g10k-auth"
+	g10kSSHDir    = "/etc/puppetlabs/g10k-ssh"
+	// g10k hardlinks Forge modules from its cache into the environments, so the cache must live on the same
+	// volume as the code (a separate volume fails with "invalid cross-device link").
+	g10kCacheDir    = codeDir + "/.g10k-cache"
 	tokenExpiryAnno = "voxkube.io/expires-at"
 	tokenRefreshAt  = 10 * time.Minute
 
@@ -277,12 +279,10 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 		corev1.Volume{Name: "g10k-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: cmName}, DefaultMode: &scriptMode,
 		}}},
-		corev1.Volume{Name: "g10k-cache", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	)
 	mounts := []corev1.VolumeMount{
 		{Name: "puppet-code", MountPath: codeDir},
 		{Name: "g10k-config", MountPath: g10kConfigDir, ReadOnly: true},
-		{Name: "g10k-cache", MountPath: g10kCacheDir},
 	}
 	if authSecret != "" {
 		plan.volumes = append(plan.volumes, corev1.Volume{Name: "g10k-auth", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: authSecret}}})

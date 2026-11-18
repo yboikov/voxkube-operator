@@ -87,9 +87,13 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 				},
 			},
 			Networking: openvoxv1alpha1.ClusterNetworkingSpec{
-				ExternalHostname: "puppet.apps.ocp.example.com",
-				OpenShiftRoute: &openvoxv1alpha1.OpenShiftRouteSpec{
-					Enabled: true,
+				Server: openvoxv1alpha1.EndpointNetworkingSpec{
+					ExternalHostname: "puppet.apps.ocp.example.com",
+					OpenShiftRoute:   &openvoxv1alpha1.OpenShiftRouteSpec{Enabled: true},
+				},
+				CA: openvoxv1alpha1.EndpointNetworkingSpec{
+					ExternalHostname: "puppet-ca.apps.ocp.example.com",
+					ServiceType:      corev1.ServiceTypeLoadBalancer,
 				},
 			},
 		},
@@ -198,10 +202,25 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"production-db.openvox.svc", "production-ca.openvox.svc.cluster.local", "puppet.apps.ocp.example.com"} {
+	for _, want := range []string{"production-db.openvox.svc", "production-ca.openvox.svc.cluster.local", "puppet.apps.ocp.example.com", "puppet-ca.apps.ocp.example.com"} {
 		if !slices.Contains(leaf.DNSNames, want) {
 			t.Errorf("expected service certificate SAN %q, got %v", want, leaf.DNSNames)
 		}
+	}
+
+	// 6b. External endpoints: the compilers via a Route (443), the CA via a LoadBalancer Service (8140)
+	if updated.Status.ServerExternalURL != "https://puppet.apps.ocp.example.com:443" {
+		t.Errorf("unexpected serverExternalURL %q", updated.Status.ServerExternalURL)
+	}
+	if updated.Status.CAExternalURL != "https://puppet-ca.apps.ocp.example.com:8140" {
+		t.Errorf("unexpected caExternalURL %q", updated.Status.CAExternalURL)
+	}
+	caService := &corev1.Service{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-ca"}, caService); err != nil {
+		t.Fatal(err)
+	}
+	if caService.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		t.Errorf("expected the CA Service to be a LoadBalancer, got %s", caService.Spec.Type)
 	}
 
 	// 7. g10k configuration is rendered and compilers talk to OpenVox DB
@@ -211,6 +230,10 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	}
 	if !strings.Contains(g10kCM.Data["g10k.yaml"], "remote: 'https://github.com/myorg/puppet-control-repo.git'") {
 		t.Errorf("unexpected g10k.yaml:\n%s", g10kCM.Data["g10k.yaml"])
+	}
+	// g10k hardlinks from its cache into the environments: the cache must be on the code volume.
+	if !strings.Contains(g10kCM.Data["g10k.yaml"], ":cachedir: '/etc/puppetlabs/code/.g10k-cache'") {
+		t.Errorf("expected the g10k cache on the code volume, got:\n%s", g10kCM.Data["g10k.yaml"])
 	}
 	srvCM := &corev1.ConfigMap{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-server-config"}, srvCM); err != nil {
@@ -230,6 +253,16 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 	for _, c := range srvDeploy.Spec.Template.Spec.Containers {
 		if c.Name == "g10k-sync" {
 			t.Error("synchronized rollout must not run a g10k sidecar")
+		}
+	}
+	for _, c := range srvDeploy.Spec.Template.Spec.InitContainers {
+		if c.Name != "g10k-init" {
+			continue
+		}
+		for _, m := range c.VolumeMounts {
+			if strings.HasPrefix(m.MountPath, "/etc/puppetlabs/code/") || m.MountPath == "/var/cache/g10k" {
+				t.Errorf("g10k-init must not mount a separate volume under or for the code/cache: %s", m.MountPath)
+			}
 		}
 	}
 	if updated.Status.ObservedCommit != "a1b2c3d4e5f6" {

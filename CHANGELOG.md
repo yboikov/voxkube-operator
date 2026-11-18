@@ -8,8 +8,46 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Fixed
+- `code.mode: git`: `g10k-init` crashed with "invalid cross-device link" as soon as the `Puppetfile` had Forge
+  modules. g10k hardlinks modules from its cache into the environments, and the cache was on a separate
+  volume. The cache now lives on the code volume (`/etc/puppetlabs/code/.g10k-cache`).
+
+### Changed
+- Images are no longer built on every push to `main`: only releases and pre-releases push images, and pull
+  requests build them without pushing. Unreleased code is tested through pre-releases (`v0.3.0-rc.1`).
+- The weekly rebuild now refreshes the OpenVox images of the latest release and tags them `<openvox>-<YYYYMMDD>`,
+  instead of rebuilding `main` and overwriting `<openvox>-<sha>`.
+
 ### Added
-- Weekly GHCR cleanup workflow: keeps release/version tags, `latest` and the newest 20 commit builds per image.
+- Weekly GHCR cleanup workflow: keeps `latest`, every release/version tag and the newest 20 `<sha>`-only tags per
+  image; deletes older ones and untagged leftovers (never manifests still referenced by a kept image).
+
+## [0.2.0]
+
+### Breaking
+- `spec.networking` is split into `server` and `ca` blocks with the same fields. Move `externalHostname`,
+  `additionalDNSNames`, `serviceType` and `openShiftRoute` under `networking.server`:
+
+  ```yaml
+  # 0.1.x                          # 0.2.0
+  networking:                      networking:
+    externalHostname: puppet.x       server:
+    openShiftRoute:                    externalHostname: puppet.x
+      enabled: true                    openShiftRoute:
+                                         enabled: true
+  ```
+  Helm values move the same way (`cluster.networking.server.*`). Apply the new CRDs before upgrading the chart.
+
+### Added
+- The CA can be exposed to agents outside the cluster: `networking.ca` (external hostname, Service type,
+  passthrough Route `<cluster>-ca`). Its hostnames are added to the service certificate.
+- `status.serverExternalURL` and `status.caExternalURL` show what agents should use as `server` / `ca_server`.
+
+### Fixed
+- Disabling `openShiftRoute` now deletes the Route instead of leaving it behind.
 
 ## [0.1.0]: first release
 
@@ -29,5 +67,7 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yboikov/voxkube-operator/releases/tag/v0.1.0

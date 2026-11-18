@@ -31,6 +31,8 @@ update that section in the same change. Never document a field as working unless
     certs (e.g. the Prometheus scraper cert).
   - The ENC parameter `noop` from `globalNoop` is advisory; Puppet code must honour it.
   - `puppetserver.conf` keeps the `master-*` key names that are known to work with the shipped image.
+  - `spec.networking` has two symmetric blocks, `server` (compilers) and `ca`, sharing one service certificate
+    whose SANs are the union of both. Add new exposure options to `EndpointNetworkingSpec`, not as flat fields.
 
 ## Code map
 
@@ -75,6 +77,8 @@ update that section in the same change. Never document a field as working unless
 9. Operator releases follow SemVer (README → "Versioning & Releases"). Add user-visible changes to the
    `[Unreleased]` section of `CHANGELOG.md` in the same PR. Only the owner tags releases; a release PR bumps
    `version` and `appVersion` in `Chart.yaml` together (a test enforces that they are equal).
+10. CI publishes images only for `v*` tags (releases and pre-releases) and from the weekly OpenVox rebuild;
+    pushes to `main` run lint and tests only. Don't add image pushes to `main` builds.
 
 ## Known limitations / backlog
 
