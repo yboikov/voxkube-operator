@@ -148,6 +148,15 @@ spec:
                     default: 10s
                     description: ScrapeTimeout is the Prometheus scrape timeout.
                     type: string
+                  targetLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      TargetLabels are static labels added to every scraped target, e.g. {"role": "web", "alerts": "true"}.
+                      They are set on the headless Service and copied to the targets through the ServiceMonitor's targetLabels.
+                      Keys must be Prometheus label names ([a-zA-Z_][a-zA-Z0-9_]*, not starting with "__") other than job,
+                      instance, namespace, service, endpoint, pod and container. Values must be valid Kubernetes label values.
+                    type: object
                   tls:
                     description: TLS configures HTTPS / mTLS scraping of VM exporters.
                     properties:

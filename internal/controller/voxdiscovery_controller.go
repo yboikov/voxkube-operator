@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -63,6 +64,18 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if err := validateTargetLabels(disc.Spec.ServiceMonitor.TargetLabels); err != nil {
+		meta.SetStatusCondition(&disc.Status.Conditions, metav1.Condition{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			ObservedGeneration: disc.Generation,
+			Reason:             "InvalidTargetLabels",
+			Message:            err.Error(),
+		})
+		_ = r.Status().Update(ctx, disc)
+		return ctrl.Result{}, nil
 	}
 
 	cluster := &openvoxv1alpha1.VoxCluster{}
@@ -222,7 +235,7 @@ func (r *VoxDiscoveryReconciler) reconcileHeadlessService(ctx context.Context, d
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      svcName,
 			Namespace: disc.Namespace,
-			Labels:    voxDiscoveryLabels(disc.Name),
+			Labels:    discoveryServiceLabels(disc),
 		},
 		Spec: corev1.ServiceSpec{
 			ClusterIP: corev1.ClusterIPNone,
@@ -513,11 +526,60 @@ func buildServiceMonitorSpec(disc *openvoxv1alpha1.VoxDiscovery, scraperSecName 
 		matchLabels[k] = v
 	}
 
-	return map[string]interface{}{
+	spec := map[string]interface{}{
 		"serviceDiscoveryRole": "EndpointSlice",
 		"selector":             map[string]interface{}{"matchLabels": matchLabels},
 		"endpoints":            smEndpoints,
 	}
+	if keys := sortedKeys(disc.Spec.ServiceMonitor.TargetLabels); len(keys) > 0 {
+		spec["targetLabels"] = toInterfaceSlice(keys)
+	}
+	return spec
+}
+
+// reservedTargetLabels are set by Prometheus or Prometheus Operator on every ServiceMonitor target.
+var reservedTargetLabels = map[string]bool{
+	"job": true, "instance": true, "namespace": true, "service": true, "endpoint": true, "pod": true, "container": true,
+}
+
+var prometheusLabelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// validateTargetLabels checks that serviceMonitor.targetLabels can be both Service labels and Prometheus labels.
+func validateTargetLabels(labels map[string]string) error {
+	for _, k := range sortedKeys(labels) {
+		switch {
+		case !prometheusLabelName.MatchString(k) || strings.HasPrefix(k, "__"):
+			return fmt.Errorf("serviceMonitor.targetLabels: %q is not a valid Prometheus label name", k)
+		case reservedTargetLabels[k]:
+			return fmt.Errorf("serviceMonitor.targetLabels: %q is reserved by Prometheus", k)
+		}
+		if errs := validation.IsValidLabelValue(labels[k]); len(errs) > 0 {
+			return fmt.Errorf("serviceMonitor.targetLabels[%s]: %s", k, strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
+// discoveryServiceLabels are the headless Service labels: serviceMonitor.targetLabels plus the selector labels
+// (which cannot collide: Prometheus label names contain no "." or "/").
+func discoveryServiceLabels(disc *openvoxv1alpha1.VoxDiscovery) map[string]string {
+	labels := make(map[string]string, len(disc.Spec.ServiceMonitor.TargetLabels)+3)
+	for k, v := range disc.Spec.ServiceMonitor.TargetLabels {
+		labels[k] = v
+	}
+	for k, v := range voxDiscoveryLabels(disc.Name) {
+		labels[k] = v
+	}
+	return labels
+}
+
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(

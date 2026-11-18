@@ -508,3 +508,45 @@ func TestServiceMonitorUsesEndpointSliceRole(t *testing.T) {
 		t.Error("scheme must be omitted without TLS")
 	}
 }
+
+func TestDiscoveryTargetLabels(t *testing.T) {
+	disc := &openvoxv1alpha1.VoxDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-exporter-web", Namespace: "openvox"},
+		Spec: openvoxv1alpha1.VoxDiscoverySpec{
+			Ports: []openvoxv1alpha1.DiscoveryPort{{Name: "metrics", Port: 9119}},
+			ServiceMonitor: openvoxv1alpha1.DiscoveryServiceMonitorSpec{
+				Enabled:      true,
+				TargetLabels: map[string]string{"role": "web", "alerts": "true"},
+			},
+		},
+	}
+	if err := validateTargetLabels(disc.Spec.ServiceMonitor.TargetLabels); err != nil {
+		t.Fatalf("valid labels rejected: %v", err)
+	}
+	spec := buildServiceMonitorSpec(disc, "")
+	got, _ := spec["targetLabels"].([]interface{})
+	if len(got) != 2 || got[0] != "alerts" || got[1] != "role" {
+		t.Errorf("expected sorted targetLabels [alerts role], got %v", spec["targetLabels"])
+	}
+	svcLabels := discoveryServiceLabels(disc)
+	if svcLabels["role"] != "web" || svcLabels["alerts"] != "true" || svcLabels["app.kubernetes.io/instance"] != "node-exporter-web" {
+		t.Errorf("Service must carry target labels and selector labels, got %v", svcLabels)
+	}
+
+	disc.Spec.ServiceMonitor.TargetLabels = nil
+	if _, ok := buildServiceMonitorSpec(disc, "")["targetLabels"]; ok {
+		t.Error("targetLabels must be omitted when empty")
+	}
+
+	for name, labels := range map[string]map[string]string{
+		"reserved":      {"job": "x"},
+		"dunder":        {"__meta": "x"},
+		"dotted key":    {"app.role": "x"},
+		"leading digit": {"1role": "x"},
+		"bad value":     {"role": "web server"},
+	} {
+		if err := validateTargetLabels(labels); err == nil {
+			t.Errorf("%s: expected %v to be rejected", name, labels)
+		}
+	}
+}

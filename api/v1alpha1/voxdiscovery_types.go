@@ -80,6 +80,13 @@ type DiscoveryServiceMonitorSpec struct {
 	// +optional
 	AdditionalLabels map[string]string `json:"additionalLabels,omitempty"`
 
+	// TargetLabels are static labels added to every scraped target, e.g. {"role": "web", "alerts": "true"}.
+	// They are set on the headless Service and copied to the targets through the ServiceMonitor's targetLabels.
+	// Keys must be Prometheus label names ([a-zA-Z_][a-zA-Z0-9_]*, not starting with "__") other than job,
+	// instance, namespace, service, endpoint, pod and container. Values must be valid Kubernetes label values.
+	// +optional
+	TargetLabels map[string]string `json:"targetLabels,omitempty"`
+
 	// TLS configures HTTPS / mTLS scraping of VM exporters.
 	// +optional
 	TLS DiscoveryTLSSpec `json:"tls,omitempty"`

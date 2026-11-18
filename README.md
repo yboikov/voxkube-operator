@@ -284,6 +284,30 @@ The ServiceMonitor uses `serviceDiscoveryRole: EndpointSlice`, because the opera
 - Its service account can `get`/`list`/`watch` `endpointslices` (`discovery.k8s.io`) in the `VoxDiscovery` namespace.
 - On OpenShift, monitoring for user-defined projects must be enabled (`enableUserWorkload: true` in `cluster-monitoring-config`), and the namespace must not carry `openshift.io/cluster-monitoring=true` or `openshift.io/user-monitoring=false`.
 
+To label targets per group (for example the `pp_role` trusted extension, for alert routing), create one `VoxDiscovery` per group and give it `targetLabels`:
+
+```yaml
+apiVersion: voxkube.io/v1alpha1
+kind: VoxDiscovery
+metadata:
+  name: node-exporter-web
+spec:
+  clusterRef: production
+  selector:
+    classes: [profile::node_exporter]
+    pql: 'trusted.extensions.pp_role = "web"'
+  ports:
+    - name: metrics
+      port: 9119
+  serviceMonitor:
+    enabled: true
+    targetLabels:
+      role: web
+      alerts: "true"
+```
+
+Every target then has `role="web"` and `alerts="true"`, next to `job="node-exporter-web"` and `instance=<certname>`.
+
 Check it end to end:
 
 ```bash
@@ -749,6 +773,7 @@ Fact filters are then applied client-side. Nodes whose `VoxNode` is `Revoked` or
 | `interval` / `scrapeTimeout` | string | `30s` / `10s` | – | Scrape settings. |
 | `preserveNodeHostnameAsInstance` | bool | `true` | – | Relabels `__meta_kubernetes_endpointslice_endpoint_node_name` → `instance`, so `instance` is the certname. |
 | `additionalLabels` | map[string]string | – | – | Extra labels on the ServiceMonitor. |
+| `targetLabels` | map[string]string | – | Keys: Prometheus label names (`[a-zA-Z_][a-zA-Z0-9_]*`, no `__` prefix), not `job`, `instance`, `namespace`, `service`, `endpoint`, `pod`, `container`. Values: Kubernetes label values. Invalid → `Ready=False`, reason `InvalidTargetLabels`. | Static labels on every scraped target, e.g. `role: web`. Set on the headless Service and listed in the ServiceMonitor's `targetLabels`. |
 | `tls.enabled` | bool | `false` | – | Sets `scheme: https` and `tlsConfig`. |
 | `tls.mode` | string | `openvoxCA` | `openvoxCA` \| `secretRef` | `openvoxCA` mints Secret `<vd>-prometheus-scraper-tls` (`ca.crt`, `tls.crt`, `tls.key`; `CN=prometheus-scraper`, valid 1 year, renewed 30 days before expiry, **no** CA admin rights). `secretRef` uses `tls.secretName` (keys `ca.crt`, `tls.crt`, `tls.key`). |
 | `tls.secretName` | string | – | – | For `secretRef`. |
@@ -761,7 +786,7 @@ All of these are owned by the `VoxDiscovery` and labelled `app.kubernetes.io/nam
 
 | Kind | Name | Notes |
 |---|---|---|
-| Service | `<vd>` | Headless (`clusterIP: None`), no selector. |
+| Service | `<vd>` | Headless (`clusterIP: None`), no selector. Also labelled with `serviceMonitor.targetLabels`. |
 | EndpointSlice | `<vd>-<n>` (IPv4), `<vd>-v6-<n>` (IPv6) | At most 100 endpoints each, sorted by certname. `hostname` = first DNS label of the certname, `nodeName` = certname. Surplus slices are pruned. |
 | ServiceMonitor | `<vd>` | When `serviceMonitor.enabled`. Always `serviceDiscoveryRole: EndpointSlice`. |
 | Secret | `<vd>-prometheus-scraper-tls` | When `tls.enabled` and `mode: openvoxCA`. |
@@ -775,7 +800,7 @@ All of these are owned by the `VoxDiscovery` and labelled `app.kubernetes.io/nam
 | `serviceName` | string | `<vd>` |
 | `scraperSecretName` | string | TLS Secret used by the ServiceMonitor, if any. |
 | `lastSyncTime` | timestamp | Last successful sync. |
-| `conditions` | []`Condition` | `Ready` (`Synced`, `QueryFailed`, `ClusterNotFound`, `DatabaseDisabled`). |
+| `conditions` | []`Condition` | `Ready` (`Synced`, `QueryFailed`, `ClusterNotFound`, `DatabaseDisabled`, `InvalidTargetLabels`). |
 
 ---
 

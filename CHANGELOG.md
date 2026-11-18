@@ -10,6 +10,11 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [0.2.2]
 
+### Added
+- `VoxDiscovery.spec.serviceMonitor.targetLabels`: static labels (e.g. `role`, `alerts`) on every scraped target.
+  They are set on the headless Service and copied to the targets by the ServiceMonitor's `targetLabels`.
+  Invalid keys or values set `Ready=False` with reason `InvalidTargetLabels`.
+
 ### Fixed
 - `VoxDiscovery` ServiceMonitor found no targets: the operator publishes targets only as EndpointSlices, but
   Prometheus Operator discovers through Endpoints by default. The ServiceMonitor now sets
