@@ -1,72 +1,90 @@
-# VoxKube (`voxkube-operator`)
+# VoxKube
 
-[![Built Entirely with AI](https://img.shields.io/badge/Built_Entirely_with-AI-8A2BE2?style=flat-square)](#ai-built-notice)
-[![API Group](https://img.shields.io/badge/API-voxkube.io%2Fv1alpha1-blue?style=flat-square)](#custom-resources-guide-custom-resources)
-[![OpenShift](https://img.shields.io/badge/OpenShift-restricted--v2_SCC_Ready-EE0000?style=flat-square)](#why-voxkube-why-voxkube)
+[![Built Entirely with AI](https://img.shields.io/badge/Built_Entirely_with-AI-8A2BE2?style=flat-square)](#vibe-coded)
+[![API Group](https://img.shields.io/badge/API-voxkube.io%2Fv1alpha1-blue?style=flat-square)](#api-reference-api-reference)
+[![OpenShift](https://img.shields.io/badge/OpenShift-restricted--v2_SCC_Ready-EE0000?style=flat-square)](#why-run-it-this-way)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green?style=flat-square)](LICENSE)
 
-> [!IMPORTANT]
-> **AI-Built Project Notice (`#ai-built-notice`)**: This entire project (**`VoxKube`** / `voxkube-operator` -- architecture, CRDs, Go controllers, container images, ESO & `cert-manager` Hiera Bridge, GitHub App authentication, PuppetDB `EndpointSlice` discovery, Helm chart, unit tests, and documentation) was **designed, architected, and built entirely with AI**.
+> [!NOTE]
+> <a id="vibe-coded"></a>**Vibe-coded project.** Everything in this repository was written by AI. There are no human edits anywhere in it. ;)
 
-**VoxKube** is a Kubernetes and OpenShift operator that runs a complete [OpenVox](https://voxpupuli.org/openvox/) (open-source Puppet 8) infrastructure using three Custom Resources:
+## What is VoxKube?
 
-- **`VoxCluster` (`kubectl get vc`)** -- Deploys and manages your OpenVox stack: a dedicated Certificate Authority (`<cluster>-ca`), horizontally scalable stateless catalog compilers (`<cluster>-server`), OpenVox DB / PuppetDB (`<cluster>-db`), and PostgreSQL (`<cluster>-postgres` or an external database).
-- **`VoxNode` (`kubectl get vn`)** -- Manages an individual client VM or server: approves its certificate request (CSR), defines its Puppet classes/role/parameters (ENC), provisions `cert-manager` SSL certificates or External Secrets for that machine, and cleans it up from both the CA and PuppetDB when deleted.
-- **`VoxDiscovery` (`kubectl get vd`)** -- Queries OpenVox DB for active machines matching your facts or classes and exports their IPs as native Kubernetes `EndpointSlice`s and Prometheus `ServiceMonitor`s.
+VoxKube runs your Puppet infrastructure on Kubernetes or OpenShift. It uses [OpenVox](https://voxpupuli.org/openvox/), the community fork of Puppet 8, and is driven entirely by YAML.
 
----
+Traditionally, a Puppet server lives on hand-built VMs. You sign each new machine's certificate by hand on the CA, keep machine roles in a separate tool such as Foreman, scatter secrets across encrypted Hiera files, and maintain a separate list of machines for monitoring. VoxKube replaces all of that with three Kubernetes resources. You describe the Puppet server, the machines it manages and what to monitor; the operator builds and runs everything, and keeps it that way. Approving a new machine, giving it a role, handing it a TLS certificate, muting its alerts or retiring it is a change to one YAML file, so it all fits into Git and ArgoCD like the rest of your cluster.
 
-## Why VoxKube? (`#why-voxkube`)
+> [!TIP]
+> **Built for OpenShift.** Every pod runs under the default `restricted-v2` SCC (no root, no fixed UIDs), and **OpenShift Routes are included**: set `openShiftRoute.enabled: true` and the operator creates passthrough Routes for the compilers and the CA, adds their hostnames to the certificates, and reports the URLs agents should use in the `VoxCluster` status (`serverExternalURL`, `caExternalURL`). Agents outside the cluster connect on port 443, with no LoadBalancer or NodePort needed.
 
-Running Puppet / OpenVox inside Kubernetes or OpenShift traditionally hits four pain points. VoxKube solves all of them out of the box:
+> [!TIP]
+> **Puppet code straight from Git, with GitHub App authentication.** Set `code.mode: git` and point it at your control repo: every branch becomes a Puppet environment, deployed by g10k together with its `Puppetfile` modules. Authenticate as a **GitHub App** (the operator exchanges the App's private key for short-lived installation tokens and renews them itself, so there are no personal tokens or deploy keys to rotate), or with an SSH key or HTTPS token. The operator polls the repository, so no inbound webhook through your firewall is needed, and updates the compilers when a branch changes.
 
-1. **Separated CA (`StatefulSet`) vs. Stateless Compilers (`Deployment`)**:
-   - OpenVox CA state (`serial`, `inventory.txt`, `ca_crl.pem`, `signed/`, `requests/`) is file-based and not safe for concurrent multi-pod writes.
-   - VoxKube runs a dedicated 1-replica **`<cluster>-ca` `StatefulSet`** backed by a standard `ReadWriteOnce` PersistentVolumeClaim (`<cluster>-ca-data`), while **`<cluster>-server`** runs as a stateless `Deployment` (`2..N` replicas) with CA disabled so you can scale catalog compilation horizontally without `ReadWriteMany` storage.
-2. **Disaster-Recovery (DR) Safe CA Storage**:
-   - The CA bootstrap container checks whether `ca_crt.pem` already exists on the `<cluster>-ca-data` PVC before seeding.
-   - If a pod restarts or you restore a cluster from storage backup, VoxKube reuses the existing CA certificate, private key, CRL, and signed client inventory on the PVC. Your existing VMs continue checking in without re-enrolling.
-3. **100% OpenShift `restricted-v2` SCC Compliant**:
-   - All workloads (`voxkube-operator`, `openvox-server`, `openvox-db`, `postgresql`) run rootless without hardcoded UIDs/GIDs, allowing OpenShift to assign arbitrary namespace UIDs cleanly.
-4. **First-Party Container Images (`linux/amd64`)**:
-   - Built directly from official Vox Pupuli OpenVox 8 packages (`yum.voxpupuli.org`) on Red Hat UBI 9 via GitHub Actions:
-     - `ghcr.io/yboikov/voxkube-operator:<git sha>` (and `latest`)
-     - `ghcr.io/yboikov/openvox-server:8.18.0` / `ghcr.io/yboikov/openvox-db:8.18.0`
-   - OpenVox versions are **pinned** (see [Image versions](#image-versions)), never "whatever the repo has today".
+## The components
 
----
+### What you write: three resources
 
-## How It Works
+| Resource | Short name | Think of it as | What it does |
+|---|---|---|---|
+| **`VoxCluster`** | `vc` | *the Puppet server* | Creates and runs the whole OpenVox stack: CA, compilers, database, and the Puppet code deployment from Git (GitHub App, SSH key or HTTPS token). One per Puppet installation. |
+| **`VoxNode`** | `vn` | *one managed machine* | Approves the machine's certificate and decides what Puppet applies to it (environment, role, classes, parameters). It can also give the machine TLS certificates from cert-manager and Kubernetes secrets through Hiera, mute its alerts, and retire it cleanly. |
+| **`VoxDiscovery`** | `vd` | *machines → Prometheus* | Asks OpenVox DB which machines exist (for example "everything that runs `profile::node_exporter`") and publishes them as scrape targets, so Prometheus finds new machines on its own. |
+
+### What runs in the cluster
+
+For a `VoxCluster` named `production`, the operator creates:
+
+| Component | Kubernetes object | Role |
+|---|---|---|
+| **Operator** | `voxkube-operator` Deployment | Watches the three resources and creates, updates and repairs everything below. |
+| **CA** | `production-ca` StatefulSet (1 pod) + `production-ca-data` PVC | Signs and revokes agent certificates. It is a single pod because the CA keeps its state in files. The CA certificate and its data are **kept** when you delete the cluster, so a rebuilt cluster keeps trusting the existing machines. |
+| **Compilers** | `production-server` Deployment (2..N pods) | Compile catalogs for the agents. They hold no state, so you can scale them out or let an autoscaler do it. Their Puppet code comes from Git (via [g10k](https://github.com/xorpaul/g10k)), a PVC or an image. |
+| **OpenVox DB** | `production-db` Deployment | PuppetDB: stores facts, catalogs and reports. Optional; `VoxNode` status and `VoxDiscovery` need it. |
+| **PostgreSQL** | your database, or `production-postgres` | The database behind OpenVox DB. Use your own (for example CloudNativePG) in production; the built-in one is for demos and loses its data on restart. |
+| **Routes** (OpenShift) | `production` and `production-ca` Routes | Optional TLS-passthrough Routes for agents outside the cluster: `puppet.example.com:443` for catalogs, `puppet-ca.example.com:443` for certificates. On plain Kubernetes, use a LoadBalancer or NodePort Service instead. |
+
+### How a machine joins
 
 ```mermaid
-flowchart TD
-    subgraph inputs["Your YAML Manifests - voxkube.io/v1alpha1"]
-        VC["VoxCluster (kubectl get vc)"]
-        VN["VoxNode (kubectl get vn)"]
-        VD["VoxDiscovery (kubectl get vd)"]
-    end
+sequenceDiagram
+    participant VM as Agent (VM)
+    participant CA as production-ca
+    participant You as You / Git
+    participant Op as voxkube-operator
+    participant SRV as production-server
+    participant DB as production-db
+    participant P as Prometheus
 
-    subgraph stack["OpenVox Stack in Kubernetes and OpenShift"]
-        CA["production-ca-0 (StatefulSet :8140) + production-ca-data PVC (RWO)"]
-        SRV["production-server (Deployment :8140) - 2..N Stateless Compilers + ENC + Hiera"]
-        DB["production-db (OpenVox DB :8080/:8081) + production-postgres"]
-        EPS["Kubernetes EndpointSlices + Prometheus ServiceMonitor"]
-    end
-
-    subgraph clients["Managed Client VMs and Pods"]
-        VM["OpenVox Agent (puppet agent -t)"]
-    end
-
-    VC -->|"reconciles"| CA
-    VC -->|"reconciles"| SRV
-    VC -->|"reconciles"| DB
-    VN -->|"signs CSR / cleans cert"| CA
-    VN -->|"injects ENC and Hiera"| SRV
-    VD -->|"queries inventory"| DB
-    VD -->|"exports IPs"| EPS
-    VM -->|"1. ca_server :8140 - CSR and Cert"| CA
-    VM -->|"2. server :8140 - Catalog"| SRV
+    VM->>CA: 1. certificate request
+    Op->>You: 2. VoxNode web01 appears as PendingApproval (or you add it to Git first)
+    You->>Op: 3. state: Active, role: role::webserver
+    Op->>CA: 4. sign
+    VM->>SRV: 5. puppet agent -t: catalog for role::webserver
+    SRV->>DB: 6. facts and report
+    Op->>DB: 7. VoxDiscovery query
+    Op->>P: 8. web01 becomes a scrape target
 ```
+
+1. The agent sends a certificate request to the CA.
+2. The operator notices it and creates a `VoxNode` in `PendingApproval` (with the default `autosignMode: voxnode`), unless you already created one in Git.
+3. You approve it by setting `state: Active`, together with what Puppet should apply.
+4. The operator signs the certificate on the CA.
+5. The agent fetches its catalog from the compilers, built from your Git code and the `VoxNode`'s classification.
+6. The compilers store facts and the run report in OpenVox DB, and `VoxNode` status shows the last run.
+7. `VoxDiscovery` finds the machine in OpenVox DB and publishes it as a Prometheus target (steps 7 and 8).
+
+Removing the machine is the reverse: `state: Decommissioned` revokes its certificate, removes it from OpenVox DB and drops its Prometheus target.
+
+## Why run it this way?
+
+- **Scales without shared storage.** Only the CA needs a volume (`ReadWriteOnce`). The compilers are stateless, so there is no `ReadWriteMany` and no NFS.
+- **The CA survives disasters.** The CA certificate and its data are not owned by the `VoxCluster`. Delete and recreate the cluster, or restore both from a backup, and existing machines keep working without re-enrolling.
+- **GitOps all the way.** Puppet code comes from Git by polling (no inbound webhooks through your firewall, GitHub App authentication supported), and machines are YAML files that ArgoCD can manage.
+- **Secrets stay in Kubernetes.** Secrets from External Secrets Operator or cert-manager reach Puppet through Hiera, always as `Sensitive`, so they never show up in logs or reports.
+- **Runs on OpenShift as is.** Every pod runs under the default `restricted-v2` SCC, with no fixed UIDs and no root, and OpenShift Routes (TLS passthrough) for the compilers and the CA are built in.
+- **Pinned images.** `ghcr.io/yboikov/openvox-server` and `openvox-db` are built from the official OpenVox 8 packages on UBI 9, at a pinned version (see [Image versions](#image-versions)). No Docker Hub images are needed at runtime.
+
+**Where to go next:** [Quickstart](#5-minute-quickstart) · [Guides](#custom-resources-guide-custom-resources) · [API reference](#api-reference-api-reference) · [Releases & upgrading](#versioning--releases)
 
 ---
 
