@@ -8,6 +8,10 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Changed
+- Releases no longer rebuild the OpenVox images when `images/<image>/` is unchanged since the previous release;
+  the existing image gets the new tags instead.
+
 ## [0.2.2]
 
 ### Added
