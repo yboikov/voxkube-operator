@@ -82,6 +82,26 @@ if [ -s "$SSHDIR/ssh-privatekey" ]; then
   export GIT_SSH_COMMAND="ssh -i /tmp/g10k-ssh/id -o IdentitiesOnly=yes -o StrictHostKeyChecking=$STRICT -o UserKnownHostsFile=/tmp/g10k-ssh/known_hosts"
 fi
 
+# Branch heads of the remote, hashed. The sidecar (--if-changed) deploys only when they moved since this pod's
+# last deployment, or at least every VOXKUBE_FULL_SYNC_SECONDS, which also picks up Puppetfile modules that track
+# a branch. The state file lives on the code volume, so the sidecar sees what g10k-init deployed.
+STATE=` + codeDir + `/.voxkube-deployed-refs
+refs=""
+if [ -n "${VOXKUBE_GIT_REMOTE:-}" ]; then
+  if out=$(git ls-remote --heads "$VOXKUBE_GIT_REMOTE"); then
+    refs=$(printf '%s\n' "$out" | sha256sum | cut -d' ' -f1)
+  else
+    echo "WARN: git ls-remote $VOXKUBE_GIT_REMOTE failed" >&2
+    [ "${1:-}" = "--if-changed" ] && exit 1
+  fi
+fi
+if [ "${1:-}" = "--if-changed" ] && [ -n "$refs" ] && [ -s "$STATE" ]; then
+  read -r last_refs last_time < "$STATE" || true
+  if [ "$refs" = "${last_refs:-}" ] && [ $(( $(date +%s) - ${last_time:-0} )) -lt "${VOXKUBE_FULL_SYNC_SECONDS:-3600}" ]; then
+    exit 0
+  fi
+fi
+
 mkdir -p ` + codeDir + `/environments ` + g10kCacheDir + `
 /usr/local/bin/g10k -config ` + g10kConfigDir + `/g10k.yaml -quiet
 
@@ -96,14 +116,15 @@ if [ "${VOXKUBE_GENERATE_TYPES:-true}" = "true" ]; then
       || echo "WARN: puppet generate types failed for environment $env" >&2
   done
 fi
+[ -n "$refs" ] && echo "$refs $(date +%s)" > "$STATE"
 echo "g10k deployment finished at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 `
 
-// g10kSidecarScript re-runs the deployment every VOXKUBE_POLL_SECONDS.
+// g10kSidecarScript checks the remote every VOXKUBE_POLL_SECONDS and redeploys only when a branch moved.
 const g10kSidecarScript = `#!/bin/sh
 while true; do
   sleep "${VOXKUBE_POLL_SECONDS:-60}"
-  ` + g10kConfigDir + `/deploy.sh || echo "WARN: g10k deployment failed; retrying in ${VOXKUBE_POLL_SECONDS:-60}s" >&2
+  ` + g10kConfigDir + `/deploy.sh --if-changed || echo "WARN: g10k deployment failed; retrying in ${VOXKUBE_POLL_SECONDS:-60}s" >&2
 done
 `
 
@@ -297,6 +318,7 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	env := []corev1.EnvVar{
 		{Name: "VOXKUBE_GENERATE_TYPES", Value: fmt.Sprintf("%t", generateTypes)},
 		{Name: "VOXKUBE_POLL_SECONDS", Value: fmt.Sprintf("%d", int(poll.Seconds()))},
+		{Name: "VOXKUBE_GIT_REMOTE", Value: g.Remote},
 	}
 	plan.initContainers = append(plan.initContainers, corev1.Container{
 		Name:            "g10k-init",
