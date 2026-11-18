@@ -84,7 +84,7 @@ Removing the machine is the reverse: `state: Decommissioned` revokes its certifi
 - **Runs on OpenShift as is.** Every pod runs under the default `restricted-v2` SCC, with no fixed UIDs and no root, and OpenShift Routes (TLS passthrough) for the compilers and the CA are built in.
 - **Pinned images.** `ghcr.io/yboikov/openvox-server` and `openvox-db` are built from the official OpenVox 8 packages on UBI 9, at a pinned version (see [Image versions](#image-versions)). No Docker Hub images are needed at runtime.
 
-**Where to go next:** [Quickstart](#5-minute-quickstart) · [Guides](#custom-resources-guide-custom-resources) · [API reference](#api-reference-api-reference) · [Releases & upgrading](#versioning--releases)
+**Where to go next:** [Docs site with the interactive API explorer](https://yboikov.github.io/voxkube-operator/) · [Quickstart](#5-minute-quickstart) · [Guides](#custom-resources-guide-custom-resources) · [API reference](#api-reference-api-reference) · [Releases & upgrading](#versioning--releases)
 
 ---
 
@@ -952,6 +952,7 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 | Push to `main` | Lint and tests only. No images. |
 | Release / pre-release (`v*` tag) | Operator image built and pushed. OpenVox images rebuilt only if `images/<image>/` changed since the previous release or the version tag doesn't exist yet; otherwise the existing image just gets the new tags. Chart pushed, files attached to the GitHub Release. |
 | Weekly (Monday) | OpenVox images of the latest release rebuilt for base-image security fixes. |
+| Push to `main` touching the site, README or CRDs; release published | Docs site rebuilt and deployed to GitHub Pages (`.github/workflows/pages.yaml`). |
 
 **Releasing**
 

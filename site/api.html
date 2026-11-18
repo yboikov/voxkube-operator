@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API reference · VoxKube</title>
+<meta name="description" content="Every field of the VoxKube custom resources, with types, defaults and descriptions.">
+<link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="assets/site.css">
+<script type="module" src="assets/app.js"></script>
+</head>
+<body data-page="api">
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="index.html"><img src="assets/logo.svg" alt="" width="26" height="26">VoxKube</a>
+    <nav class="nav" aria-label="Site">
+      <a href="index.html">Overview</a>
+      <a href="docs.html">Docs</a>
+      <a href="api.html" aria-current="page">API reference</a>
+      <a href="https://github.com/yboikov/voxkube-operator">GitHub</a>
+    </nav>
+    <span class="version" data-version></span>
+  </div>
+</header>
+
+<main id="content" class="api">
+  <aside class="side" aria-label="Resources">
+    <input id="search" class="search" type="search" placeholder="Search fields  ( / )" autocomplete="off" aria-label="Search fields">
+    <ul class="side-kinds" id="side-kinds"></ul>
+    <ul class="results" id="results" hidden aria-live="polite"></ul>
+  </aside>
+  <section class="main" id="main"><p class="loading">Loading the API…</p></section>
+</main>
+</body>
+</html>

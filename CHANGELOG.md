@@ -8,6 +8,10 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Added
+- Docs site on GitHub Pages: overview, the README, and an interactive API explorer generated from the CRDs
+  (search, permalinks to every field, types, defaults and validation).
+
 ## [0.2.3]
 
 ### Fixed
