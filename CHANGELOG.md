@@ -8,6 +8,13 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.1]
+
+### Fixed
+- `code.mode: git`: `g10k-init` crashed with "invalid cross-device link" as soon as the `Puppetfile` had Forge
+  modules. g10k hardlinks modules from its cache into the environments, and the cache was on a separate
+  volume. The cache now lives on the code volume (`/etc/puppetlabs/code/.g10k-cache`).
+
 ## [0.2.0]
 
 ### Breaking
@@ -50,6 +57,7 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/yboikov/voxkube-operator/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/yboikov/voxkube-operator/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yboikov/voxkube-operator/releases/tag/v0.1.0
