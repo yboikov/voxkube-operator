@@ -15,6 +15,12 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   modules. g10k hardlinks modules from its cache into the environments, and the cache was on a separate
   volume. The cache now lives on the code volume (`/etc/puppetlabs/code/.g10k-cache`).
 
+### Changed
+- Images are no longer built on every push to `main`: only releases and pre-releases push images, and pull
+  requests build them without pushing. Unreleased code is tested through pre-releases (`v0.3.0-rc.1`).
+- The weekly rebuild now refreshes the OpenVox images of the latest release and tags them `<openvox>-<YYYYMMDD>`,
+  instead of rebuilding `main` and overwriting `<openvox>-<sha>`.
+
 ## [0.2.0]
 
 ### Breaking

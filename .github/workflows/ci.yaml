@@ -48,9 +48,17 @@ jobs:
           helm lint charts/voxkube-operator
           helm template voxkube charts/voxkube-operator --set cluster.enabled=true > /dev/null
 
+  # Images are pushed only for releases (v* tags) and by the weekly rebuild of the latest release.
+  # Pull requests and manual runs build without pushing; pushes to main only run lint and tests.
+  #
+  #   event                 voxkube-operator                    openvox-server / openvox-db
+  #   release vX.Y.Z        X.Y.Z, X.Y, latest, <sha>           <openvox>, <openvox>-<sha>, <sha>
+  #   pre-release vX.Y.Z-*  X.Y.Z-*, <sha>                      <openvox>-<sha>, <sha> (+ <openvox> if it doesn't exist yet)
+  #   weekly schedule       (not rebuilt)                       <openvox>, <openvox>-<YYYYMMDD>  (latest release, base-image fixes)
   build-images:
-    name: Build ${{ github.event_name == 'pull_request' && '(no push)' || '& Push' }} ${{ matrix.image }}
+    name: Build ${{ matrix.image }}
     needs: lint-and-test
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -65,81 +73,138 @@ jobs:
           - image: openvox-db
             file: images/openvox-db/Containerfile
             version_arg: OPENVOXDB_VERSION
+    env:
+      IS_TAG: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      IS_PRERELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-') }}
+      IS_SCHEDULE: ${{ github.event_name == 'schedule' }}
     steps:
+      - name: Find the latest release (weekly rebuild)
+        id: latest
+        if: env.IS_SCHEDULE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view -R "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Latest release: ${tag:-none}"
+
+      - name: Decide whether this job runs
+        id: gate
+        run: |
+          run=true
+          if [ "$IS_SCHEDULE" = true ]; then
+            # The weekly job only refreshes the OpenVox images of the latest release.
+            if [ "${{ matrix.image }}" = voxkube-operator ] || [ -z "${{ steps.latest.outputs.tag }}" ]; then run=false; fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
+        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.latest.outputs.tag || github.ref }}
 
       # Operator version: the tag on releases (v0.1.0 -> 0.1.0), otherwise <chart version>-dev.<sha>.
-      - name: Determine operator version
-        id: opver
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            v="${GITHUB_REF_NAME#v}"
-          else
-            v="$(grep -m1 -oP '^version:\s*\K\S+' charts/voxkube-operator/Chart.yaml)-dev.${GITHUB_SHA::7}"
-          fi
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-          echo "Operator version: $v"
-
-      - name: Read pinned OpenVox version
+      - name: Determine versions
         id: ver
-        if: matrix.version_arg != ''
+        if: steps.gate.outputs.run == 'true'
         run: |
-          v=$(grep -m1 -oP "^ARG ${{ matrix.version_arg }}=\K\S+" "${{ matrix.file }}")
-          test -n "$v"
-          echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "Pinned ${{ matrix.version_arg }}=$v"
+          if [ "$IS_TAG" = true ]; then
+            op="${GITHUB_REF_NAME#v}"
+          else
+            op="$(grep -m1 -oP '^version:\s*\K\S+' charts/voxkube-operator/Chart.yaml)-dev.$(git rev-parse --short=7 HEAD)"
+          fi
+          ov=""
+          if [ -n "${{ matrix.version_arg }}" ]; then
+            ov=$(grep -m1 -oP "^ARG ${{ matrix.version_arg }}=\K\S+" "${{ matrix.file }}")
+            test -n "$ov"
+          fi
+          {
+            echo "operator=$op"
+            echo "openvox=$ov"
+            echo "sha=$(git rev-parse --short=7 HEAD)"
+            echo "date=$(date -u +%Y%m%d)"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+          echo "operator=$op openvox=${ov:-n/a}"
 
       - name: Set up Docker Buildx
+        if: steps.gate.outputs.run == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry (GHCR)
-        if: github.event_name != 'pull_request'
+        if: steps.gate.outputs.run == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tags for the OpenVox images on the default branch:
-      #   <version>        e.g. 8.18.0          (moves when the image is rebuilt for the same OpenVox version)
-      #   <version>-<sha>  e.g. 8.18.0-1a2b3c4  (immutable; use this or a digest in production)
-      #   <sha>, latest
-      - name: Extract Docker metadata for ${{ matrix.image }}
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
-          tags: |
-            type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ steps.ver.outputs.version != '' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-            type=sha,prefix=${{ steps.ver.outputs.version }}-,enable=${{ steps.ver.outputs.version != '' }}
-            type=semver,pattern={{version}},enable=${{ matrix.image == 'voxkube-operator' }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ matrix.image == 'voxkube-operator' }}
-          labels: |
-            org.opencontainers.image.version=${{ steps.ver.outputs.version || steps.opver.outputs.version }}
+      # A pre-release must not move <openvox>, unless that tag doesn't exist yet (a new pin); otherwise the
+      # pre-release chart, which references <openvox>, couldn't be installed.
+      - name: Check whether the OpenVox version tag exists
+        id: exists
+        if: steps.gate.outputs.run == 'true' && steps.ver.outputs.openvox != ''
+        run: |
+          if docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ steps.ver.outputs.openvox }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # Pull requests build and push nothing, so a bad pin fails before merge.
-      - name: Build ${{ github.event_name == 'pull_request' && '' || 'and push ' }}${{ matrix.image }}
+      - name: Compute tags
+        id: tags
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          img="ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}"
+          op="${{ steps.ver.outputs.operator }}"; ov="${{ steps.ver.outputs.openvox }}"; sha="${{ steps.ver.outputs.sha }}"
+          tags=()
+          if [ "$IS_SCHEDULE" = true ]; then
+            tags+=("$img:$ov" "$img:$ov-${{ steps.ver.outputs.date }}")
+          elif [ "$IS_TAG" = true ]; then
+            tags+=("$img:$sha")
+            if [ -z "$ov" ]; then
+              tags+=("$img:$op")
+              if [ "$IS_PRERELEASE" = false ]; then
+                tags+=("$img:${op%.*}" "$img:latest")
+              fi
+            else
+              tags+=("$img:$ov-$sha")
+              if [ "$IS_PRERELEASE" = false ] || [ "${{ steps.exists.outputs.exists }}" = false ]; then
+                tags+=("$img:$ov")
+              fi
+            fi
+          fi
+          printf '%s\n' "${tags[@]}"
+          {
+            echo "list<<EOF"
+            printf '%s\n' "${tags[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          [ ${#tags[@]} -gt 0 ] && echo "push=true" >> "$GITHUB_OUTPUT" || echo "push=false" >> "$GITHUB_OUTPUT"
+
+      - name: Build ${{ matrix.image }}
+        if: steps.gate.outputs.run == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.file }}
           platforms: linux/amd64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ steps.tags.outputs.push == 'true' }}
+          tags: ${{ steps.tags.outputs.list }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.ver.outputs.openvox || steps.ver.outputs.operator }}
+            org.opencontainers.image.revision=${{ steps.ver.outputs.sha }}
           build-args: |
-            VERSION=${{ steps.opver.outputs.version }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.opver.outputs.build_date }}
+            VERSION=${{ steps.ver.outputs.operator }}
+            COMMIT=${{ steps.ver.outputs.sha }}
+            BUILD_DATE=${{ steps.ver.outputs.build_date }}
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   # Release: runs only for v* tags, after all images are pushed.
-  #   1. the tag must equal Chart.yaml version and appVersion (v0.1.0 <-> 0.1.0)
+  #   1. the tag must equal Chart.yaml version and appVersion (v0.1.0 <-> 0.1.0); pre-releases (v0.3.0-rc.1)
+  #      skip this and package the chart as the tag version instead
   #   2. the chart is pushed to oci://ghcr.io/<owner>/charts
   #   3. a GitHub Release is created with generated notes, the chart and the CRDs
   release:
@@ -158,6 +223,7 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: Check that the tag matches the chart
+        if: ${{ !contains(github.ref_name, '-') }}
         run: |
           tag="${GITHUB_REF_NAME#v}"
           version=$(grep -m1 -oP '^version:\s*\K\S+' charts/voxkube-operator/Chart.yaml)
@@ -171,7 +237,12 @@ jobs:
       - name: Package and push the Helm chart
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm package charts/voxkube-operator --destination dist
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            # Pre-release: the chart is packaged as the tag version and installs the matching operator image.
+            helm package charts/voxkube-operator --destination dist --version "${GITHUB_REF_NAME#v}" --app-version "${GITHUB_REF_NAME#v}"
+          else
+            helm package charts/voxkube-operator --destination dist
+          fi
           helm push dist/voxkube-operator-*.tgz "oci://ghcr.io/${{ github.repository_owner }}/charts"
           cat config/crd/bases/*.yaml > dist/voxkube-crds.yaml
 
@@ -185,6 +256,8 @@ jobs:
             echo "Release $GITHUB_REF_NAME already exists (created in the UI); attaching assets"
             gh release upload "$GITHUB_REF_NAME" dist/voxkube-operator-*.tgz dist/voxkube-crds.yaml --clobber
           else
+            pre=""
+            [[ "$GITHUB_REF_NAME" == *-* ]] && pre="--prerelease"
             gh release create "$GITHUB_REF_NAME" dist/voxkube-operator-*.tgz dist/voxkube-crds.yaml \
-              --title "VoxKube $GITHUB_REF_NAME" --generate-notes --verify-tag
+              --title "VoxKube $GITHUB_REF_NAME" --generate-notes --verify-tag $pre
           fi
