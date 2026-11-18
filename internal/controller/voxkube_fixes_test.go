@@ -501,8 +501,9 @@ func TestServiceMonitorUsesEndpointSliceRole(t *testing.T) {
 	disc.Spec.ServiceMonitor.PreserveNodeHostnameAsInstance = &off
 	disc.Spec.ServiceMonitor.TLS.Enabled = false
 	ep = buildServiceMonitorSpec(disc, "")["endpoints"].([]interface{})[0].(map[string]interface{})
-	if _, ok := ep["relabelings"]; ok {
-		t.Error("relabelings must be omitted when preserveNodeHostnameAsInstance is false")
+	rls := ep["relabelings"].([]interface{})
+	if len(rls) != 1 || rls[0].(map[string]interface{})["action"] != "labelmap" {
+		t.Errorf("without preserveNodeHostnameAsInstance only the per-target labelmap must remain, got %v", rls)
 	}
 	if _, ok := ep["scheme"]; ok {
 		t.Error("scheme must be omitted without TLS")
@@ -547,6 +548,79 @@ func TestDiscoveryTargetLabels(t *testing.T) {
 	} {
 		if err := validateTargetLabels(labels); err == nil {
 			t.Errorf("%s: expected %v to be rejected", name, labels)
+		}
+	}
+}
+
+func TestDiscoveryEndpointLabels(t *testing.T) {
+	disc := &openvoxv1alpha1.VoxDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-exporter", Namespace: "openvox"},
+		Spec: openvoxv1alpha1.VoxDiscoverySpec{
+			Ports:          []openvoxv1alpha1.DiscoveryPort{{Name: "metrics", Port: 9119}},
+			EndpointLabels: map[string]string{"role": "trusted.extensions.pp_role", "os": "os.family", "kernel": "kernelrelease"},
+			ServiceMonitor: openvoxv1alpha1.DiscoveryServiceMonitorSpec{
+				Enabled:      true,
+				TargetLabels: map[string]string{"env": "prod"},
+			},
+		},
+	}
+	if err := validateDiscoveryLabels(disc); err != nil {
+		t.Fatalf("valid labels rejected: %v", err)
+	}
+	node := DiscoveredPuppetNode{
+		Certname: "web01.example.com",
+		Facts: map[string]interface{}{
+			"trusted":       map[string]interface{}{"extensions": map[string]interface{}{"pp_role": "web"}},
+			"os":            map[string]interface{}{"family": "RedHat"},
+			"kernelrelease": "this is not a label value",
+		},
+	}
+	vnLabels := voxNodeMonitoringLabels(map[string]string{
+		"monitoring.voxkube.io/alerts": "false",
+		"monitoring.voxkube.io/role":   "web-canary", // VoxNode overrides the fact
+		"monitoring.voxkube.io/env":    "dev",        // owned by targetLabels: skipped
+		"app.kubernetes.io/name":       "ignored",
+	})
+	topo, skipped := endpointTopology(disc, node, vnLabels)
+	want := map[string]string{
+		"label.voxkube.io/role":   "web-canary",
+		"label.voxkube.io/os":     "RedHat",
+		"label.voxkube.io/alerts": "false",
+	}
+	if len(topo) != len(want) {
+		t.Fatalf("expected %v, got %v", want, topo)
+	}
+	for k, v := range want {
+		if topo[k] != v {
+			t.Errorf("topology[%s] = %q, want %q", k, topo[k], v)
+		}
+	}
+	if skipped != 2 {
+		t.Errorf("expected 2 skipped labels (invalid fact value, env owned by targetLabels), got %d", skipped)
+	}
+
+	if topo, _ := endpointTopology(disc, DiscoveredPuppetNode{Certname: "bare"}, nil); topo != nil {
+		t.Errorf("node without facts or VoxNode labels must have no topology, got %v", topo)
+	}
+
+	ep := buildServiceMonitorSpec(disc, "")["endpoints"].([]interface{})[0].(map[string]interface{})
+	rls := ep["relabelings"].([]interface{})
+	lm := rls[len(rls)-1].(map[string]interface{})
+	if lm["action"] != "labelmap" || lm["regex"] != "__meta_kubernetes_endpointslice_endpoint_topology_label_voxkube_io_(.+)" {
+		t.Errorf("expected labelmap for per-target labels, got %v", lm)
+	}
+
+	for name, spec := range map[string]map[string]string{
+		"reserved":         {"instance": "certname"},
+		"trailing _":       {"role_": "x"},
+		"dash":             {"pp-role": "x"},
+		"empty fact path":  {"role": " "},
+		"also targetLabel": {"env": "x"},
+	} {
+		d := disc.DeepCopy()
+		d.Spec.EndpointLabels = spec
+		if err := validateDiscoveryLabels(d); err == nil {
+			t.Errorf("%s: expected %v to be rejected", name, spec)
 		}
 	}
 }

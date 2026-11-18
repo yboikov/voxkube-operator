@@ -112,6 +112,15 @@ type VoxDiscoverySpec struct {
 	// Ports lists the network ports exposed in the headless Service and EndpointSlices.
 	Ports []DiscoveryPort `json:"ports"`
 
+	// EndpointLabels adds per-target labels read from each node's OpenVox DB facts: target label name → fact
+	// path, e.g. {"role": "trusted.extensions.pp_role", "os": "os.family"}. Values that are not valid Kubernetes
+	// label values (e.g. containing spaces, longer than 63 characters) are skipped. Labels on the node's VoxNode
+	// named monitoring.voxkube.io/<label> are added too and override EndpointLabels.
+	// Names must match [a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])? and must not be reserved Prometheus labels or also
+	// appear in serviceMonitor.targetLabels.
+	// +optional
+	EndpointLabels map[string]string `json:"endpointLabels,omitempty"`
+
 	// ServiceMonitor optionally creates a Prometheus ServiceMonitor with hostname relabeling and mTLS.
 	// +optional
 	ServiceMonitor DiscoveryServiceMonitorSpec `json:"serviceMonitor,omitempty"`

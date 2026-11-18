@@ -727,6 +727,13 @@ func (in *VoxDiscoverySpec) DeepCopyInto(out *VoxDiscoverySpec) {
 		*out = make([]DiscoveryPort, len(*in))
 		copy(*out, *in)
 	}
+	if in.EndpointLabels != nil {
+		in, out := &in.EndpointLabels, &out.EndpointLabels
+		*out = make(map[string]string, len(*in))
+		for key, val := range *in {
+			(*out)[key] = val
+		}
+	}
 	in.ServiceMonitor.DeepCopyInto(&out.ServiceMonitor)
 }
 

@@ -66,12 +66,12 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	if err := validateTargetLabels(disc.Spec.ServiceMonitor.TargetLabels); err != nil {
+	if err := validateDiscoveryLabels(disc); err != nil {
 		meta.SetStatusCondition(&disc.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: disc.Generation,
-			Reason:             "InvalidTargetLabels",
+			Reason:             "InvalidLabels",
 			Message:            err.Error(),
 		})
 		_ = r.Status().Update(ctx, disc)
@@ -139,13 +139,20 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// Also filter out any VoxNode in the namespace that is explicitly Decommissioned or Revoked
+	// and collect the monitoring.voxkube.io/<label> labels of the others.
 	decommissionedSet := make(map[string]bool)
+	nodeLabels := make(map[string]map[string]string)
 	voxNodeList := &openvoxv1alpha1.VoxNodeList{}
 	if err := r.List(ctx, voxNodeList, client.InNamespace(disc.Namespace)); err == nil {
 		for _, vn := range voxNodeList.Items {
-			if vn.Spec.ClusterRef == cluster.Name &&
-				(vn.Spec.State == openvoxv1alpha1.NodeStateDecommissioned || vn.Spec.State == openvoxv1alpha1.NodeStateRevoked) {
+			if vn.Spec.ClusterRef != cluster.Name {
+				continue
+			}
+			if vn.Spec.State == openvoxv1alpha1.NodeStateDecommissioned || vn.Spec.State == openvoxv1alpha1.NodeStateRevoked {
 				decommissionedSet[vn.Spec.Certname] = true
+			}
+			if l := voxNodeMonitoringLabels(vn.Labels); len(l) > 0 {
+				nodeLabels[vn.Spec.Certname] = l
 			}
 		}
 	}
@@ -171,7 +178,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// 3. Reconcile chunked EndpointSlices (<= 100 endpoints per slice, one set per IP family)
-	discoveredCount, sliceCount, err := r.reconcileEndpointSlices(ctx, disc, svcName, activeNodes, decommissionedSet)
+	discoveredCount, sliceCount, skippedLabels, err := r.reconcileEndpointSlices(ctx, disc, svcName, activeNodes, decommissionedSet, nodeLabels)
 	if err != nil {
 		logger.Error(err, "failed to reconcile EndpointSlices")
 		return ctrl.Result{}, err
@@ -199,7 +206,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: disc.Generation,
 		Reason:             "Synced",
-		Message:            fmt.Sprintf("Exported %d active nodes across %d EndpointSlice(s)", discoveredCount, sliceCount),
+		Message:            discoverySyncedMessage(discoveredCount, sliceCount, skippedLabels),
 	})
 
 	desiredStatus := disc.Status
@@ -271,7 +278,8 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 	svcName string,
 	nodes []DiscoveredPuppetNode,
 	decommissionedSet map[string]bool,
-) (discoveredCount int32, sliceCount int32, err error) {
+	nodeLabels map[string]map[string]string,
+) (discoveredCount int32, sliceCount int32, skippedLabels int, err error) {
 	addrFact := disc.Spec.AddressFact
 	if addrFact == "" {
 		addrFact = "networking.ip"
@@ -299,6 +307,11 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 			Hostname:   &hostname,
 			NodeName:   &nodeName,
 			Conditions: discoveryv1.EndpointConditions{Ready: new(true)},
+		}
+		topology, skipped := endpointTopology(disc, n, nodeLabels[n.Certname])
+		skippedLabels += skipped
+		if len(topology) > 0 {
+			ep.DeprecatedTopology = topology
 		}
 		if ip.To4() != nil {
 			endpointsV4 = append(endpointsV4, ep)
@@ -366,23 +379,23 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 			Ports:       slicePorts,
 		}
 		if err := controllerutil.SetControllerReference(disc, slice, r.Scheme); err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 
 		existing := &discoveryv1.EndpointSlice{}
 		getErr := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: sliceName}, existing)
 		if apierrors.IsNotFound(getErr) {
 			if err := r.Create(ctx, slice); err != nil {
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 		} else if getErr == nil {
 			if existing.AddressType != sl.family {
 				// addressType is immutable; recreate the slice.
 				if err := r.Delete(ctx, existing); err != nil && !apierrors.IsNotFound(err) {
-					return 0, 0, err
+					return 0, 0, 0, err
 				}
 				if err := r.Create(ctx, slice); err != nil {
-					return 0, 0, err
+					return 0, 0, 0, err
 				}
 				continue
 			}
@@ -390,10 +403,10 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 			existing.Ports = slice.Ports
 			existing.Labels = slice.Labels
 			if err := r.Update(ctx, existing); err != nil {
-				return 0, 0, err
+				return 0, 0, 0, err
 			}
 		} else {
-			return 0, 0, getErr
+			return 0, 0, 0, getErr
 		}
 	}
 
@@ -410,7 +423,7 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		}
 	}
 
-	return int32(len(endpointsV4) + len(endpointsV6)), int32(len(slices)), nil
+	return int32(len(endpointsV4) + len(endpointsV6)), int32(len(slices)), skippedLabels, nil
 }
 
 func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
@@ -497,19 +510,26 @@ func buildServiceMonitorSpec(disc *openvoxv1alpha1.VoxDiscovery, scraperSecName 
 			"interval":      interval,
 			"scrapeTimeout": scrapeTimeout,
 		}
+		var relabelings []interface{}
 		if disc.Spec.ServiceMonitor.PreserveNodeHostnameAsInstance == nil || *disc.Spec.ServiceMonitor.PreserveNodeHostnameAsInstance {
 			// nodeName on each endpoint is the Puppet certname; only a non-empty value replaces the default
 			// instance (<ip>:<port>).
-			ep["relabelings"] = []interface{}{
-				map[string]interface{}{
-					"sourceLabels": []interface{}{"__meta_kubernetes_endpointslice_endpoint_node_name"},
-					"regex":        "(.+)",
-					"targetLabel":  "instance",
-					"replacement":  "$1",
-					"action":       "replace",
-				},
-			}
+			relabelings = append(relabelings, map[string]interface{}{
+				"sourceLabels": []interface{}{"__meta_kubernetes_endpointslice_endpoint_node_name"},
+				"regex":        "(.+)",
+				"targetLabel":  "instance",
+				"replacement":  "$1",
+				"action":       "replace",
+			})
 		}
+		// Per-target labels (endpointLabels and VoxNode monitoring.voxkube.io/* labels) travel in the endpoint's
+		// deprecatedTopology map, which Prometheus exposes as __meta_kubernetes_endpointslice_endpoint_topology_*.
+		relabelings = append(relabelings, map[string]interface{}{
+			"action":      "labelmap",
+			"regex":       endpointTopologyMetaPrefix + "(.+)",
+			"replacement": "$1",
+		})
+		ep["relabelings"] = relabelings
 		if disc.Spec.ServiceMonitor.TLS.Enabled && scraperSecName != "" {
 			ep["scheme"] = "https"
 			ep["tlsConfig"] = map[string]interface{}{
@@ -571,6 +591,93 @@ func discoveryServiceLabels(disc *openvoxv1alpha1.VoxDiscovery) map[string]strin
 		labels[k] = v
 	}
 	return labels
+}
+
+const (
+	// voxNodeMonitoringLabelPrefix marks VoxNode labels that become labels of the node's scrape targets.
+	voxNodeMonitoringLabelPrefix = "monitoring.voxkube.io/"
+	// endpointTopologyKeyPrefix prefixes per-target labels in EndpointSlice endpoints' deprecatedTopology.
+	endpointTopologyKeyPrefix = "label.voxkube.io/"
+	// endpointTopologyMetaPrefix is endpointTopologyKeyPrefix as Prometheus exposes it (invalid characters → "_").
+	endpointTopologyMetaPrefix = "__meta_kubernetes_endpointslice_endpoint_topology_label_voxkube_io_"
+)
+
+// endpointLabelName is a Prometheus label name that is also a valid Kubernetes label key name segment.
+var endpointLabelName = regexp.MustCompile(`^[a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])?$`)
+
+// validateDiscoveryLabels checks serviceMonitor.targetLabels and endpointLabels.
+func validateDiscoveryLabels(disc *openvoxv1alpha1.VoxDiscovery) error {
+	if err := validateTargetLabels(disc.Spec.ServiceMonitor.TargetLabels); err != nil {
+		return err
+	}
+	for _, k := range sortedKeys(disc.Spec.EndpointLabels) {
+		switch {
+		case !endpointLabelName.MatchString(k) || len(k) > 63:
+			return fmt.Errorf("endpointLabels: %q must match [a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])? (max 63 characters)", k)
+		case reservedTargetLabels[k]:
+			return fmt.Errorf("endpointLabels: %q is reserved by Prometheus", k)
+		case strings.TrimSpace(disc.Spec.EndpointLabels[k]) == "":
+			return fmt.Errorf("endpointLabels[%s]: fact path is empty", k)
+		}
+		if _, ok := disc.Spec.ServiceMonitor.TargetLabels[k]; ok {
+			return fmt.Errorf("endpointLabels: %q is also in serviceMonitor.targetLabels; use one or the other", k)
+		}
+	}
+	return nil
+}
+
+// voxNodeMonitoringLabels returns the monitoring.voxkube.io/<label> labels of a VoxNode as <label> → value.
+func voxNodeMonitoringLabels(labels map[string]string) map[string]string {
+	out := make(map[string]string)
+	for k, v := range labels {
+		if name, ok := strings.CutPrefix(k, voxNodeMonitoringLabelPrefix); ok {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// endpointTopology builds the deprecatedTopology map carrying a node's per-target labels: endpointLabels from
+// its facts, overridden by its VoxNode's monitoring.voxkube.io/* labels. It returns how many labels were
+// skipped because the name or value cannot be used.
+func endpointTopology(disc *openvoxv1alpha1.VoxDiscovery, node DiscoveredPuppetNode, voxNodeLabels map[string]string) (map[string]string, int) {
+	labels := make(map[string]string)
+	skipped := 0
+	for name, factPath := range disc.Spec.EndpointLabels {
+		v := LookupFactString(node.Facts, factPath)
+		if v == "" {
+			continue
+		}
+		if len(validation.IsValidLabelValue(v)) > 0 {
+			skipped++
+			continue
+		}
+		labels[name] = v
+	}
+	for name, v := range voxNodeLabels {
+		_, inTargetLabels := disc.Spec.ServiceMonitor.TargetLabels[name]
+		if !endpointLabelName.MatchString(name) || reservedTargetLabels[name] || inTargetLabels {
+			skipped++
+			continue
+		}
+		labels[name] = v // already a valid label value: the API server validated the VoxNode label
+	}
+	if len(labels) == 0 {
+		return nil, skipped
+	}
+	topology := make(map[string]string, len(labels))
+	for name, v := range labels {
+		topology[endpointTopologyKeyPrefix+name] = v
+	}
+	return topology, skipped
+}
+
+func discoverySyncedMessage(nodes, slices int32, skippedLabels int) string {
+	msg := fmt.Sprintf("Exported %d active nodes across %d EndpointSlice(s)", nodes, slices)
+	if skippedLabels > 0 {
+		msg += fmt.Sprintf("; skipped %d target label(s) with an invalid name or value", skippedLabels)
+	}
+	return msg
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -721,7 +828,21 @@ func (r *VoxDiscoveryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&discoveryv1.EndpointSlice{}).
 		Owns(&corev1.Secret{}).
 		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForCluster)).
+		Watches(&openvoxv1alpha1.VoxNode{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForVoxNode)).
 		Complete(r)
+}
+
+// discoveriesForVoxNode enqueues the VoxDiscoveries of a VoxNode's cluster, so that label and state changes on
+// the VoxNode reach the EndpointSlices without waiting for the next sync.
+func (r *VoxDiscoveryReconciler) discoveriesForVoxNode(ctx context.Context, obj client.Object) []reconcile.Request {
+	vn, ok := obj.(*openvoxv1alpha1.VoxNode)
+	if !ok {
+		return nil
+	}
+	cluster := &openvoxv1alpha1.VoxCluster{}
+	cluster.SetName(vn.Spec.ClusterRef)
+	cluster.SetNamespace(vn.Namespace)
+	return r.discoveriesForCluster(ctx, cluster)
 }
 
 // discoveriesForCluster enqueues every VoxDiscovery that references the changed VoxCluster

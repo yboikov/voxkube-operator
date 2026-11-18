@@ -69,6 +69,17 @@ spec:
                 description: ClusterRef is the name of the VoxCluster whose OpenVox
                   DB (PuppetDB) is queried.
                 type: string
+              endpointLabels:
+                additionalProperties:
+                  type: string
+                description: |-
+                  EndpointLabels adds per-target labels read from each node's OpenVox DB facts: target label name → fact
+                  path, e.g. {"role": "trusted.extensions.pp_role", "os": "os.family"}. Values that are not valid Kubernetes
+                  label values (e.g. containing spaces, longer than 63 characters) are skipped. Labels on the node's VoxNode
+                  named monitoring.voxkube.io/<label> are added too and override EndpointLabels.
+                  Names must match [a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])? and must not be reserved Prometheus labels or also
+                  appear in serviceMonitor.targetLabels.
+                type: object
               ports:
                 description: Ports lists the network ports exposed in the headless
                   Service and EndpointSlices.
