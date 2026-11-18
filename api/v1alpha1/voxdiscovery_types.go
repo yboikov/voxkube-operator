@@ -80,6 +80,13 @@ type DiscoveryServiceMonitorSpec struct {
 	// +optional
 	AdditionalLabels map[string]string `json:"additionalLabels,omitempty"`
 
+	// TargetLabels are static labels added to every scraped target, e.g. {"role": "web", "alerts": "true"}.
+	// They are set on the headless Service and copied to the targets through the ServiceMonitor's targetLabels.
+	// Keys must be Prometheus label names ([a-zA-Z_][a-zA-Z0-9_]*, not starting with "__") other than job,
+	// instance, namespace, service, endpoint, pod and container. Values must be valid Kubernetes label values.
+	// +optional
+	TargetLabels map[string]string `json:"targetLabels,omitempty"`
+
 	// TLS configures HTTPS / mTLS scraping of VM exporters.
 	// +optional
 	TLS DiscoveryTLSSpec `json:"tls,omitempty"`
@@ -104,6 +111,15 @@ type VoxDiscoverySpec struct {
 
 	// Ports lists the network ports exposed in the headless Service and EndpointSlices.
 	Ports []DiscoveryPort `json:"ports"`
+
+	// EndpointLabels adds per-target labels read from each node's OpenVox DB facts: target label name → fact
+	// path, e.g. {"role": "trusted.extensions.pp_role", "os": "os.family"}. Values that are not valid Kubernetes
+	// label values (e.g. containing spaces, longer than 63 characters) are skipped. Labels on the node's VoxNode
+	// named monitoring.voxkube.io/<label> are added too and override EndpointLabels.
+	// Names must match [a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])? and must not be reserved Prometheus labels or also
+	// appear in serviceMonitor.targetLabels.
+	// +optional
+	EndpointLabels map[string]string `json:"endpointLabels,omitempty"`
 
 	// ServiceMonitor optionally creates a Prometheus ServiceMonitor with hostname relabeling and mTLS.
 	// +optional

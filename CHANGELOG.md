@@ -10,6 +10,16 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [0.2.2]
 
+### Added
+- `VoxDiscovery.spec.serviceMonitor.targetLabels`: static labels (e.g. `role`, `alerts`) on every scraped target.
+  They are set on the headless Service and copied to the targets by the ServiceMonitor's `targetLabels`.
+- `VoxDiscovery.spec.endpointLabels`: per-target labels read from each node's facts in OpenVox DB, e.g.
+  `role: trusted.extensions.pp_role`.
+- VoxNode labels `monitoring.voxkube.io/<label>` become labels of that machine's targets and override
+  `endpointLabels`, e.g. `monitoring.voxkube.io/alerts=false` to mute a machine. VoxNode changes are applied
+  immediately.
+- Invalid label names or values set `Ready=False` with reason `InvalidLabels`.
+
 ### Fixed
 - `VoxDiscovery` ServiceMonitor found no targets: the operator publishes targets only as EndpointSlices, but
   Prometheus Operator discovers through Endpoints by default. The ServiceMonitor now sets
