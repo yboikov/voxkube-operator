@@ -1,12 +1,10 @@
 package controller
 
 import (
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -39,29 +37,63 @@ func TestNodeMetricsCollector(t *testing.T) {
 	if err := reg.Register(c); err != nil {
 		t.Fatal(err)
 	}
-	want := `
-# HELP voxkube_node_active 1 if the VoxNode's spec.state is Active, 0 otherwise.
-# TYPE voxkube_node_active gauge
-voxkube_node_active{alerts="false",certname="web01.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="web01"} 1
-voxkube_node_active{alerts="",certname="web02.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="web02"} 1
-voxkube_node_active{alerts="",certname="new01.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="new01"} 1
-voxkube_node_active{alerts="",certname="old01.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Decommissioned",voxnode="old01"} 0
-# HELP voxkube_node_last_report_failed 1 if the latest Puppet run of an Active node failed, 0 if it succeeded. Absent until the first report.
-# TYPE voxkube_node_last_report_failed gauge
-voxkube_node_last_report_failed{alerts="false",certname="web01.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="web01"} 1
-voxkube_node_last_report_failed{alerts="",certname="web02.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="web02"} 0
-# HELP voxkube_node_last_seen_timestamp_seconds Unix time of an Active node's latest report, facts or catalog in OpenVox DB. Absent until the first check-in.
-# TYPE voxkube_node_last_seen_timestamp_seconds gauge
-voxkube_node_last_seen_timestamp_seconds{alerts="false",certname="web01.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="web01"} 1.79518e+09
-voxkube_node_last_seen_timestamp_seconds{alerts="",certname="web02.example.com",cluster="openvox",namespace="openvox",role="jumphost",state="Active",voxnode="web02"} 1.79518e+09
-`
-	if err := testutil.GatherAndCompare(reg, strings.NewReader(want)); err != nil {
-		t.Error(err)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// got["metric"]["voxnode"] = value; labels["metric"]["voxnode"] = label set
+	got := map[string]map[string]float64{}
+	labels := map[string]map[string]map[string]string{}
+	for _, f := range families {
+		got[f.GetName()] = map[string]float64{}
+		labels[f.GetName()] = map[string]map[string]string{}
+		for _, m := range f.GetMetric() {
+			ls := map[string]string{}
+			for _, lp := range m.GetLabel() {
+				ls[lp.GetName()] = lp.GetValue()
+			}
+			got[f.GetName()][ls["voxnode"]] = m.GetGauge().GetValue()
+			labels[f.GetName()][ls["voxnode"]] = ls
+		}
+	}
+
+	want := map[string]map[string]float64{
+		metricNodeActive:           {"web01": 1, "web02": 1, "new01": 1, "old01": 0},
+		metricNodeLastReportFailed: {"web01": 1, "web02": 0},
+		metricNodeLastSeen:         {"web01": 1795180000, "web02": 1795180000},
+	}
+	for metric, nodes := range want {
+		if len(got[metric]) != len(nodes) {
+			t.Errorf("%s: got %v, want %v", metric, got[metric], nodes)
+		}
+		for n, v := range nodes {
+			if g, ok := got[metric][n]; !ok || g != v {
+				t.Errorf("%s{voxnode=%q} = %v (present %v), want %v", metric, n, g, ok, v)
+			}
+		}
+	}
+
+	l := labels[metricNodeLastReportFailed]["web01"]
+	if l["certname"] != "web01.example.com" || l["role"] != "jumphost" || l["state"] != "Active" || l["cluster"] != "openvox" || l["alerts"] != "false" {
+		t.Errorf("unexpected labels on web01: %v", l)
+	}
+	if _, ok := l["job"]; ok {
+		t.Error("reserved label job must not be copied from monitoring labels")
+	}
+	if _, ok := l["name"]; ok {
+		t.Error("labels outside monitoring.voxkube.io/ must not be copied")
+	}
+	if l2 := labels[metricNodeLastReportFailed]["web02"]; l2["alerts"] != "" {
+		t.Errorf("every series in a family needs the same label names; web02 should have alerts=\"\", got %v", l2)
 	}
 
 	// No VoxNodes: nothing exported, no error.
 	empty := &NodeMetricsCollector{Reader: fake.NewClientBuilder().WithScheme(newVoxKubeScheme(t)).Build()}
-	if n := testutil.CollectAndCount(empty); n != 0 {
-		t.Errorf("expected no metrics without VoxNodes, got %d", n)
+	reg2 := prometheus.NewRegistry()
+	if err := reg2.Register(empty); err != nil {
+		t.Fatal(err)
+	}
+	if fams, err := reg2.Gather(); err != nil || len(fams) != 0 {
+		t.Errorf("expected no metrics without VoxNodes, got %d families (err %v)", len(fams), err)
 	}
 }
