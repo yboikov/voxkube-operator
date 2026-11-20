@@ -355,26 +355,50 @@ kubectl -n openvox get servicemonitor puppet-node-exporter -o yaml
 
 #### Alerts for failed or missing Puppet runs
 
-The operator exports the Puppet run state of every `VoxNode` as metrics, read from OpenVox DB, so you are alerted when a run fails or a machine stops reporting, with nothing extra on the machines. Turn on the ServiceMonitor and the bundled alert rules in the operator's chart:
+The operator exports the Puppet run state of every `VoxNode` as metrics on its metrics endpoint (see [Operator metrics](#operator-metrics)), read from OpenVox DB, so nothing extra runs on the machines. The operator only publishes the metrics: scraping and alerting are yours to configure, so changes in your monitoring stack never require an operator change. The chart creates the `<release>-metrics` Service (port `metrics`, 8080) to point your monitoring at.
+
+With Prometheus Operator (on OpenShift: user workload monitoring, so the operator must not run in an `openshift-*` namespace), for example:
 
 ```yaml
-# values for the voxkube-operator chart
-metrics:
-  serviceMonitor:
-    enabled: true
-  prometheusRule:
-    enabled: true
-    notReportingSeconds: 7200   # PuppetNodeNotReporting after 2 h without a check-in
-    failedFor: 10m              # PuppetRunFailed once the latest run has been failed for 10 min
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: voxkube-operator
+  namespace: voxkube-operator            # the operator's namespace
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: voxkube-operator
+  endpoints:
+    - port: metrics
+      interval: 60s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: puppet-runs
+  namespace: voxkube-operator
+spec:
+  groups:
+    - name: puppet-runs
+      rules:
+        - alert: PuppetRunFailed
+          expr: voxkube_node_last_report_failed{alerts!="false"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Puppet run failed on {{ $labels.certname }}"
+        - alert: PuppetNodeNotReporting
+          expr: (time() - voxkube_node_last_seen_timestamp_seconds{alerts!="false"}) > 7200
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.certname }} hasn't reported to Puppet for {{ $value | humanizeDuration }}"
 ```
 
-| Alert | Fires when |
-|---|---|
-| `PuppetRunFailed` | The latest run of an `Active` node failed (`voxkube_node_last_report_failed == 1`). Clears with the next successful run. |
-| `PuppetNodeNotReporting` | An `Active` node sent no report, facts or catalog for `notReportingSeconds`. Catches stopped or broken agents. |
-
-The VoxNode labels `monitoring.voxkube.io/<label>` are copied onto the metrics, so a machine muted with `monitoring.voxkube.io/alerts=false` is skipped by both alerts (the default `selector` is `alerts!="false"`). The operator's namespace must be covered by your Prometheus (on OpenShift: user workload monitoring, so not an `openshift-*` namespace).
-
+`alerts!="false"` skips machines muted with the VoxNode label `monitoring.voxkube.io/alerts=false`; every `monitoring.voxkube.io/<label>` is available as `<label>` for routing too.
 ---
 
 ## API Reference (`#api-reference`)
