@@ -23,7 +23,7 @@ spec:
     - jsonPath: .spec.certname
       name: Certname
       type: string
-    - jsonPath: .spec.classification.role
+    - jsonPath: .status.role
       name: Role
       type: string
     - jsonPath: .spec.state
@@ -161,7 +161,8 @@ spec:
                     type: object
                   role:
                     description: |-
-                      Role is the high-level role assigned to this node (e.g., "webserver", "database").
+                      Role is the high-level role assigned to this node (e.g., "webserver", "database"), passed to Puppet as the
+                      top-scope variable $role. When empty, the pp_role extension of the node's certificate is used.
                       Automatically unlocks Hiera secrets labeled with voxkube.io/hiera-role=<role>.
                     type: string
                 type: object
@@ -210,6 +211,14 @@ spec:
                 description: CACleaned indicates whether the node's certificate has
                   been revoked and cleaned from the CA.
                 type: boolean
+              certificateExtensions:
+                additionalProperties:
+                  type: string
+                description: |-
+                  CertificateExtensions are the Puppet extensions of the node's certificate (e.g. pp_role, pp_datacenter),
+                  read from its pending CSR before signing and from the signed certificate afterwards. Registered extensions
+                  appear by name, site-specific ones (1.3.6.1.4.1.34380.1.2.*) by OID. pp_preshared_key is never shown.
+                type: object
               certificateFingerprint:
                 description: CertificateFingerprint is the SHA256 fingerprint of the
                   signed Puppet agent certificate.
@@ -307,6 +316,11 @@ spec:
                   ready and synced to Hiera for this node.
                 format: int32
                 type: integer
+              role:
+                description: |-
+                  Role is the role passed to Puppet as the top-scope variable $role: spec.classification.role when set,
+                  otherwise the certificate's pp_role extension.
+                type: string
             type: object
         type: object
     served: true

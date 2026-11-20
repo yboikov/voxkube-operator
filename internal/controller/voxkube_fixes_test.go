@@ -211,6 +211,12 @@ func (m *mockCA) SignCSR(context.Context, string, string) (*CertStatus, error) {
 func (m *mockCA) RevokeCert(context.Context, string, string) error             { return nil }
 func (m *mockCA) CleanNode(context.Context, string, string) error              { return nil }
 func (m *mockCA) FetchCRL(context.Context, string) ([]byte, error)             { return m.crl, nil }
+func (m *mockCA) GetCertificatePEM(context.Context, string, string) ([]byte, error) {
+	return nil, ErrCertNotFound
+}
+func (m *mockCA) GetCertificateRequestPEM(context.Context, string, string) ([]byte, error) {
+	return nil, ErrCertNotFound
+}
 
 func TestVoxCluster_AutosignHPAExternalDBAndAutoCreate(t *testing.T) {
 	s := newVoxKubeScheme(t)

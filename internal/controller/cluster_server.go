@@ -75,8 +75,8 @@ func RenderVoxNodeENCYAML(node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha
 		}
 		params[k] = val
 	}
-	if node.Spec.Classification.Role != "" {
-		params["role"] = node.Spec.Classification.Role
+	if role := EffectiveRole(node); role != "" {
+		params["role"] = role
 	}
 	if injectMetadata(cluster) {
 		params["voxkube_cluster"] = cluster.Name

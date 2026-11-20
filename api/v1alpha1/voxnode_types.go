@@ -39,7 +39,8 @@ type NodeClassificationSpec struct {
 	// +optional
 	Environment string `json:"environment,omitempty"`
 
-	// Role is the high-level role assigned to this node (e.g., "webserver", "database").
+	// Role is the high-level role assigned to this node (e.g., "webserver", "database"), passed to Puppet as the
+	// top-scope variable $role. When empty, the pp_role extension of the node's certificate is used.
 	// Automatically unlocks Hiera secrets labeled with voxkube.io/hiera-role=<role>.
 	// +optional
 	Role string `json:"role,omitempty"`
@@ -154,6 +155,17 @@ type VoxNodeStatus struct {
 	// +optional
 	CertificateFingerprint string `json:"certificateFingerprint,omitempty"`
 
+	// CertificateExtensions are the Puppet extensions of the node's certificate (e.g. pp_role, pp_datacenter),
+	// read from its pending CSR before signing and from the signed certificate afterwards. Registered extensions
+	// appear by name, site-specific ones (1.3.6.1.4.1.34380.1.2.*) by OID. pp_preshared_key is never shown.
+	// +optional
+	CertificateExtensions map[string]string `json:"certificateExtensions,omitempty"`
+
+	// Role is the role passed to Puppet as the top-scope variable $role: spec.classification.role when set,
+	// otherwise the certificate's pp_role extension.
+	// +optional
+	Role string `json:"role,omitempty"`
+
 	// CACleaned indicates whether the node's certificate has been revoked and cleaned from the CA.
 	// +optional
 	CACleaned bool `json:"caCleaned,omitempty"`
@@ -186,7 +198,7 @@ type VoxNodeStatus struct {
 // +kubebuilder:resource:shortName=vn
 // +kubebuilder:printcolumn:name="Cluster",type="string",JSONPath=".spec.clusterRef"
 // +kubebuilder:printcolumn:name="Certname",type="string",JSONPath=".spec.certname"
-// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".spec.classification.role"
+// +kubebuilder:printcolumn:name="Role",type="string",JSONPath=".status.role"
 // +kubebuilder:printcolumn:name="State",type="string",JSONPath=".spec.state"
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Certs",type="integer",JSONPath=".status.readyCertificates"

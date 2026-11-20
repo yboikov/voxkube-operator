@@ -135,6 +135,10 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		msg := "Awaiting approval: set spec.state to Active to sign the CSR"
 		if cs, err := r.caStatus(ctx, cluster, node); err == nil && cs.State == "requested" {
 			msg = "CSR received; set spec.state to Active to sign it"
+			r.refreshCertificateExtensions(ctx, cluster, node, status, false)
+			if role := status.CertificateExtensions[ppRoleExtensionName]; role != "" {
+				msg = fmt.Sprintf("CSR received (pp_role %q); set spec.state to Active to sign it", role)
+			}
 		}
 		setReady(false, "PendingApproval", msg)
 
@@ -151,10 +155,44 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			return ctrl.Result{}, err
 		}
 	}
+	status.Role = effectiveRoleFor(node, status)
 	if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, *status); err != nil {
 		return ctrl.Result{}, err
 	}
 	return result, nil
+}
+
+// effectiveRoleFor is EffectiveRole evaluated against the status being written.
+func effectiveRoleFor(node *openvoxv1alpha1.VoxNode, status *openvoxv1alpha1.VoxNodeStatus) string {
+	n := node.DeepCopy()
+	n.Status = *status
+	return EffectiveRole(n)
+}
+
+// refreshCertificateExtensions reads the Puppet extensions of certname's pending CSR (signed=false) or signed
+// certificate into status.CertificateExtensions. Failures keep the previous value.
+func (r *VoxNodeReconciler) refreshCertificateExtensions(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster,
+	node *openvoxv1alpha1.VoxNode, status *openvoxv1alpha1.VoxNodeStatus, signed bool) {
+	caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster)
+	if caClient == nil || cluster.Status.CAURL == "" {
+		return
+	}
+	var pemBytes []byte
+	var err error
+	if signed {
+		pemBytes, err = caClient.GetCertificatePEM(ctx, cluster.Status.CAURL, node.Spec.Certname)
+	} else {
+		pemBytes, err = caClient.GetCertificateRequestPEM(ctx, cluster.Status.CAURL, node.Spec.Certname)
+	}
+	if err == nil {
+		var exts map[string]string
+		if exts, err = PuppetExtensionsFromPEM(pemBytes); err == nil {
+			status.CertificateExtensions = exts
+			return
+		}
+	}
+	log.FromContext(ctx).Info("could not read certificate extensions from the CA; keeping the previous ones",
+		"certname", node.Spec.Certname, "signed", signed, "reason", err.Error())
 }
 
 func (r *VoxNodeReconciler) caStatus(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, node *openvoxv1alpha1.VoxNode) (*CertStatus, error) {
@@ -194,6 +232,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 		case errors.Is(err, ErrCertNotFound):
 			status.CertificateSigned = false
 			status.CertificateFingerprint = ""
+			status.CertificateExtensions = nil
 			waitingReason, waitingMsg = "AwaitingCSR", "No CSR from "+node.Spec.Certname+" yet; run 'puppet ssl bootstrap' (or 'puppet agent -t') on the node"
 			requeue = nodeRequeueWaiting
 		case err != nil:
@@ -207,6 +246,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 				"The certificate is revoked on the CA. Set state Decommissioned (or delete and re-create the VoxNode) and let the agent submit a new CSR")
 			return ctrl.Result{}, nil
 		case cs.State == "requested" && autosignMode(cluster) == autosignOff:
+			r.refreshCertificateExtensions(ctx, cluster, node, status, false)
 			status.CertificateSigned = false
 			waitingReason, waitingMsg = "AwaitingManualSigning", "autosignMode is off; sign the CSR with 'puppetserver ca sign' on the CA pod"
 			requeue = nodeRequeueWaiting
@@ -219,8 +259,13 @@ func (r *VoxNodeReconciler) reconcileActive(
 				status.CertificateSigned = signed.State == "signed"
 				status.CertificateFingerprint = signed.Fingerprint
 				r.event(node, corev1.EventTypeNormal, "CertificateSigned", "Signed CSR for "+node.Spec.Certname)
+				r.refreshCertificateExtensions(ctx, cluster, node, status, true)
 			}
 		default: // signed
+			// Read the extensions once per certificate: when first signed and whenever it was reissued.
+			if status.CertificateExtensions == nil || status.CertificateFingerprint != cs.Fingerprint {
+				r.refreshCertificateExtensions(ctx, cluster, node, status, true)
+			}
 			status.CertificateSigned = true
 			status.CertificateFingerprint = cs.Fingerprint
 		}
@@ -240,6 +285,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 
 	// Last check-in and report status from OpenVox DB.
 	seen := false
+	var dbErr error
 	if dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster); dbClient != nil && cluster.Status.DatabaseURL != "" {
 		pn, err := dbClient.GetNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname)
 		switch {
@@ -251,7 +297,11 @@ func (r *VoxNodeReconciler) reconcileActive(
 			}
 			status.LastReportStatus = pn.LatestReportStatus
 		case !errors.Is(err, ErrNodeNotFound):
-			logger.V(1).Info("OpenVox DB not reachable", "reason", err.Error())
+			// Keep the last known check-in: an OpenVox DB outage must not demote an Active node.
+			dbErr = err
+			seen = status.LastSeenTime != nil
+			logger.Info("OpenVox DB query failed; will retry", "certname", node.Spec.Certname, "reason", err.Error())
+			requeue = nodeRequeueWaiting
 		}
 	}
 
@@ -262,14 +312,22 @@ func (r *VoxNodeReconciler) reconcileActive(
 			status.Phase = openvoxv1alpha1.NodePhaseSigned
 		}
 		setReady(false, waitingReason, waitingMsg)
+	case !seen && dbErr != nil:
+		status.Phase = openvoxv1alpha1.NodePhaseSigned
+		setReady(true, "DatabaseUnreachable", "Certificate signed, but OpenVox DB can't be queried: "+dbErr.Error())
 	case !seen:
+		// Poll quickly until the first run shows up; the agent usually runs right after signing.
 		status.Phase = openvoxv1alpha1.NodePhaseSigned
 		setReady(true, "CertificateSigned", "Certificate signed; waiting for the first Puppet run to reach OpenVox DB")
+		requeue = nodeRequeueWaiting
 	default:
 		status.Phase = openvoxv1alpha1.NodePhaseActive
 		msg := "Node is signed, classified and reporting"
 		if status.LastReportStatus == "failed" {
 			msg = "Node is reporting, but its last Puppet run failed"
+		}
+		if dbErr != nil {
+			msg += " (last check-in from before the current OpenVox DB outage: " + dbErr.Error() + ")"
 		}
 		setReady(true, "NodeActive", msg)
 	}
