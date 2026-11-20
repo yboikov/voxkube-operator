@@ -85,15 +85,23 @@ fi
 # Branch heads of the remote, hashed. The sidecar (--if-changed) deploys only when they moved since this pod's
 # last deployment, or at least every VOXKUBE_FULL_SYNC_SECONDS, which also picks up Puppetfile modules that track
 # a branch. The state file lives on the code volume, so the sidecar sees what g10k-init deployed.
+# If the remote can't be reached, stop before g10k: a g10k run without the remote deploys nothing (and can leave a
+# broken mirror in its cache). g10k-init then fails and is retried by the kubelet, so a compiler never starts
+# without code; the sidecar retries on its next poll.
 STATE=` + codeDir + `/.voxkube-deployed-refs
+CACHE=` + g10kCacheDir + `
+ENVDIR=` + codeDir + `/environments
 refs=""
 if [ -n "${VOXKUBE_GIT_REMOTE:-}" ]; then
-  if out=$(git ls-remote --heads "$VOXKUBE_GIT_REMOTE"); then
-    refs=$(printf '%s\n' "$out" | sha256sum | cut -d' ' -f1)
-  else
-    echo "WARN: git ls-remote $VOXKUBE_GIT_REMOTE failed" >&2
-    [ "${1:-}" = "--if-changed" ] && exit 1
+  if ! out=$(git ls-remote --heads "$VOXKUBE_GIT_REMOTE"); then
+    echo "ERROR: git ls-remote $VOXKUBE_GIT_REMOTE failed; not deploying" >&2
+    exit 1
   fi
+  if [ -z "$out" ]; then
+    echo "ERROR: $VOXKUBE_GIT_REMOTE has no branches; not deploying" >&2
+    exit 1
+  fi
+  refs=$(printf '%s\n' "$out" | sha256sum | cut -d' ' -f1)
 fi
 if [ "${1:-}" = "--if-changed" ] && [ -n "$refs" ] && [ -s "$STATE" ]; then
   read -r last_refs last_time < "$STATE" || true
@@ -102,8 +110,17 @@ if [ "${1:-}" = "--if-changed" ] && [ -n "$refs" ] && [ -s "$STATE" ]; then
   fi
 fi
 
-mkdir -p ` + codeDir + `/environments ` + g10kCacheDir + `
+mkdir -p "$ENVDIR" "$CACHE"
 /usr/local/bin/g10k -config ` + g10kConfigDir + `/g10k.yaml -quiet
+
+# Every branch is an environment, so a successful deployment has at least one. None means g10k worked from a
+# broken cache (e.g. a mirror left over from a failed first clone): drop the cache so the next attempt clones
+# fresh, and fail without recording the state.
+if [ -z "$(ls -A "$ENVDIR" 2>/dev/null)" ]; then
+  echo "ERROR: g10k deployed no environments; clearing the g10k cache for a fresh clone on the next attempt" >&2
+  rm -rf "$CACHE"
+  exit 1
+fi
 
 if [ "${VOXKUBE_GENERATE_TYPES:-true}" = "true" ]; then
   mkdir -p /tmp/puppet-gen/conf /tmp/puppet-gen/var /tmp/puppet-gen/log /tmp/puppet-gen/run

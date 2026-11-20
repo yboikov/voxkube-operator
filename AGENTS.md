@@ -38,6 +38,10 @@ update that section in the same change. Never document a field as working unless
     `monitoring.voxkube.io/<label>`) are **EndpointSlice labels**: machines are grouped into slices by label set.
     Do not put them in endpoints' `deprecatedTopology`: the API server silently drops that field in
     `discovery.k8s.io/v1` (this shipped broken in 0.2.2).
+  - `deploy.sh` (g10k) must fail loudly rather than "succeed" with no code: it exits non-zero when
+    `git ls-remote` fails, the remote has no branches, or g10k leaves `environments/` empty (then it also deletes
+    the g10k cache, whose broken mirror would otherwise keep every later run empty). g10k itself exits 0 in
+    those cases. A pod once ran for hours without code because of this (fixed in 0.2.6).
 
 ## Code map
 

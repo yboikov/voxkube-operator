@@ -409,6 +409,11 @@ func TestVoxCluster_GitSidecarModeAndPSKRequiresSecret(t *testing.T) {
 	if !strings.Contains(g10kCM.Data["deploy.sh"], "git ls-remote --heads") || !strings.Contains(g10kCM.Data["deploy.sh"], ".voxkube-deployed-refs") {
 		t.Error("deploy.sh must record the deployed branch heads")
 	}
+	for _, want := range []string{"not deploying", "exit 1", "g10k deployed no environments", `rm -rf "$CACHE"`} {
+		if !strings.Contains(g10kCM.Data["deploy.sh"], want) {
+			t.Errorf("deploy.sh must fail on an unreachable remote or an empty deployment and reset the g10k cache (missing %q)", want)
+		}
+	}
 
 	// psk without a Secret is a spec error that must surface as Phase=Error
 	latest := &openvoxv1alpha1.VoxCluster{}

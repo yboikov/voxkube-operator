@@ -8,6 +8,16 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.6]
+
+### Fixed
+- A compiler could run without any Puppet code. If GitHub was unreachable when a pod started, g10k-init deployed
+  nothing but reported success, and the failed clone left a broken mirror in g10k's cache, so every later sync
+  also deployed nothing. `deploy.sh` now refuses to deploy when `git ls-remote` fails or the remote has no
+  branches, and treats a deployment without environments as a failure: it clears the g10k cache so the next
+  attempt clones fresh, and doesn't record the state. g10k-init fails (the kubelet retries it), so a pod only
+  starts once it has code; the sidecar retries on its next poll and keeps the existing code while GitHub is down.
+
 ## [0.2.5]
 
 ### Added
@@ -129,7 +139,8 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/yboikov/voxkube-operator/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/yboikov/voxkube-operator/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yboikov/voxkube-operator/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yboikov/voxkube-operator/compare/v0.2.2...v0.2.3
