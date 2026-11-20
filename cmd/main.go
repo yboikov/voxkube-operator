@@ -12,6 +12,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -85,6 +86,9 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	// Per-VoxNode Puppet run metrics (voxkube_node_*), read from the manager's cache on every scrape.
+	crmetrics.Registry.MustRegister(&controller.NodeMetricsCollector{Reader: mgr.GetClient()})
 
 	if err = (&controller.VoxClusterReconciler{
 		Client:         mgr.GetClient(),

@@ -33,15 +33,14 @@ resources:
     cpu: 10m
     memory: 128Mi
 
+# The operator's metrics endpoint (/metrics), incl. the per-VoxNode Puppet run metrics (voxkube_node_*).
+# The chart creates no ServiceMonitor or alert rules: scrape it and alert on it with your own monitoring objects
+# (README → "Alerts for failed or missing Puppet runs" has examples).
 metrics:
   enabled: true
   port: 8080
   service:
     enabled: true
-  serviceMonitor:
-    enabled: false
-    interval: 30s
-    labels: {}
 
 nodeSelector: {}
 tolerations: []

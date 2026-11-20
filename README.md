@@ -96,7 +96,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.2.5 \
+  --version 0.2.6 \
   --namespace openvox \
   --create-namespace
 ```
@@ -353,6 +353,52 @@ kubectl -n openvox get servicemonitor puppet-node-exporter -o yaml
 # Then query: up{namespace="openvox", job="puppet-node-exporter"}
 ```
 
+#### Alerts for failed or missing Puppet runs
+
+The operator exports the Puppet run state of every `VoxNode` as metrics on its metrics endpoint (see [Operator metrics](#operator-metrics)), read from OpenVox DB, so nothing extra runs on the machines. The operator only publishes the metrics: scraping and alerting are yours to configure, so changes in your monitoring stack never require an operator change. The chart creates the `<release>-metrics` Service (port `metrics`, 8080) to point your monitoring at.
+
+With Prometheus Operator (on OpenShift: user workload monitoring, so the operator must not run in an `openshift-*` namespace), for example:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: voxkube-operator
+  namespace: voxkube-operator            # the operator's namespace
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: voxkube-operator
+  endpoints:
+    - port: metrics
+      interval: 60s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: puppet-runs
+  namespace: voxkube-operator
+spec:
+  groups:
+    - name: puppet-runs
+      rules:
+        - alert: PuppetRunFailed
+          expr: voxkube_node_last_report_failed{alerts!="false"} == 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Puppet run failed on {{ $labels.certname }}"
+        - alert: PuppetNodeNotReporting
+          expr: (time() - voxkube_node_last_seen_timestamp_seconds{alerts!="false"}) > 7200
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.certname }} hasn't reported to Puppet for {{ $value | humanizeDuration }}"
+```
+
+`alerts!="false"` skips machines muted with the VoxNode label `monitoring.voxkube.io/alerts=false`; every `monitoring.voxkube.io/<label>` is available as `<label>` for routing too.
 ---
 
 ## API Reference (`#api-reference`)
@@ -418,7 +464,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `synchronizedRollout` | bool | `true` | – | `true`: the operator polls `info/refs` (HTTP(S) remotes only) and rolls all compilers whenever **any branch** moves, so every pod serves the same revision. `false`, or any SSH remote: every compiler runs a `g10k-sync` sidecar that checks the branches (`git ls-remote --heads`) every `pollInterval` and redeploys only when one moved, plus once an hour to pick up Puppetfile modules that track a branch. Each pod does this independently. |
 | `generateTypes` | bool | `true` | – | Runs `puppet generate types` for every environment after each g10k deployment. |
 
-How it's wired: ConfigMap `<cluster>-g10k` holds `g10k.yaml`, `deploy.sh`, `sidecar.sh` and `askpass.sh`. Compilers get a `g10k-init` init container, plus a `g10k-sync` sidecar in sidecar mode. HTTPS credentials reach git through `GIT_ASKPASS` and never appear in URLs. SSH keys are copied to a private temp file and used via `GIT_SSH_COMMAND`.
+How it's wired: ConfigMap `<cluster>-g10k` holds `g10k.yaml`, `deploy.sh`, `sidecar.sh` and `askpass.sh`. Compilers get a `g10k-init` init container, plus a `g10k-sync` sidecar in sidecar mode. HTTPS credentials reach git through `GIT_ASKPASS` and never appear in URLs. SSH keys are copied to a private temp file and used via `GIT_SSH_COMMAND`. `deploy.sh` fails (without touching the deployed code) when the remote can't be reached or has no branches, and when g10k leaves `environments/` empty; in that last case it also deletes the g10k cache so the next attempt clones fresh. A failing `g10k-init` is retried by the kubelet, so a compiler only starts with code; a failing sidecar run is retried on the next poll.
 
 #### `VoxCluster.spec.code.git.githubApp`
 
@@ -889,6 +935,18 @@ All CA and DB calls use mTLS with `ca.crt`, `tls.crt` and `tls.key` from `<clust
 | Discovery | `GET {databaseURL}/pdb/query/v4?query=<PQL>` |
 | GitHub App token | `POST {apiBaseURL}/app/installations/{id}/access_tokens` |
 | Git poll | `GET {remote}/info/refs?service=git-upload-pack` |
+
+### Operator metrics
+
+Served on the operator's metrics endpoint (`:8080/metrics`; chart: `metrics.*`), next to the standard controller-runtime metrics. Built from `VoxNode` status at scrape time.
+
+| Metric | Value | Present for |
+|---|---|---|
+| `voxkube_node_active` | `1` if `spec.state` is `Active`, else `0` | every VoxNode |
+| `voxkube_node_last_report_failed` | `1` if `status.lastReportStatus` is `failed`, else `0` | `Active` VoxNodes with a report |
+| `voxkube_node_last_seen_timestamp_seconds` | `status.lastSeenTime` as Unix time | `Active` VoxNodes seen in OpenVox DB |
+
+Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `state`, plus every VoxNode label `monitoring.voxkube.io/<label>` as `<label>` (names that aren't valid Prometheus label names, are reserved, or clash with the fixed labels are skipped; a label missing on a node is empty). The values refresh as often as the VoxNode controller reads OpenVox DB (every 5 min, 30 s while waiting for a first run).
 
 ### Operator command-line flags
 
