@@ -98,3 +98,14 @@ update that section in the same change. Never document a field as working unless
 - `sslMode: verify-*` for external PostgreSQL needs the DB CA in the OpenVox DB JVM trust store; there's no
   field for it yet.
 - Build stages pull `golang` from Docker Hub.
+- **Scaling limits (README → "Scaling limits"); fix these before an installation grows past ~100 machines with
+  certificates:**
+  - `<cluster>-hiera-secrets` is a single Secret holding all node, role and common Hiera data, including
+    cert-manager certificates (≈5–7 KB each), so it hits the 1 MiB Secret limit at roughly 100–150 machines with a
+    certificate each. Fix: one Secret per node (`<cluster>-hiera-node-<hash of certname>`) and per role, mounted
+    into the compilers through a projected volume (or rendered into a single emptyDir by an init/sidecar), keeping
+    the `nodes_<certname>.yaml` / `roles_<role>.yaml` / `common.yaml` file names so `hiera.yaml` doesn't change.
+    Watch the pod spec size: a projected volume with hundreds of sources is fine, thousands are not.
+  - Every VoxNode reconcile calls the cluster-wide ENC/Hiera refresh, so total work per 5 minutes is O(N²). Fix:
+    move rendering to one debounced, cluster-level step triggered by VoxNode/Secret changes (e.g. enqueue the
+    VoxCluster and render there), and keep VoxNode reconciles to CA/OpenVox DB status only.
