@@ -8,6 +8,22 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.5]
+
+### Added
+- `VoxNode.status.certificateExtensions`: the Puppet extensions (`pp_role`, `pp_datacenter`, …) of the node's
+  pending CSR and, once signed, of its certificate. `pp_preshared_key` is never shown. While a node waits for
+  approval, its message names the requested `pp_role`.
+- `VoxNode.status.role` and the `ROLE` column: the effective role. When `spec.classification.role` is empty, the
+  certificate's `pp_role` is passed to Puppet as `$role`, so role-scoped Hiera secrets (`voxkube.io/hiera-role`)
+  also work for machines classified by `csr_attributes.yaml`. `classification.role` still overrides it.
+
+### Fixed
+- A signed node waiting for its first Puppet run was re-checked only every 5 minutes; it is now checked every 30 s.
+- OpenVox DB query errors were logged at debug level only and the node looked like it was still waiting for its
+  first run. They are now logged and shown in the `Ready` condition (`DatabaseUnreachable`), and an OpenVox DB
+  outage no longer demotes an `Active` node to `Signed`.
+
 ### Changed
 - The docs site is built from the latest release instead of `main`, so it always matches the released version.
 
@@ -113,7 +129,8 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   usable from the GitHub UI or by pushing a tag.
 - `VoxDiscovery` stands down (`Ready=False`, `DatabaseDisabled`) when the `VoxCluster` has no database.
 
-[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/yboikov/voxkube-operator/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/yboikov/voxkube-operator/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/yboikov/voxkube-operator/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/yboikov/voxkube-operator/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/yboikov/voxkube-operator/compare/v0.2.1...v0.2.2

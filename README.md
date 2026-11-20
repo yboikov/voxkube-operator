@@ -96,7 +96,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.2.4 \
+  --version 0.2.5 \
   --namespace openvox \
   --create-namespace
 ```
@@ -653,7 +653,7 @@ Annotations set by the operator: `voxkube.io/spec-hash` on managed workloads and
 
 One managed Puppet agent: certificate lifecycle, ENC classification, cert-manager certificates, node-scoped Hiera secrets and last-run status.
 
-Printer columns: `.spec.clusterRef`, `.spec.certname`, `.spec.classification.role`, `.spec.state`, `.status.phase`, `.status.readyCertificates`, age.
+Printer columns: `.spec.clusterRef`, `.spec.certname`, `.status.role` (the effective role), `.spec.state`, `.status.phase`, `.status.readyCertificates`, age.
 
 Labels `monitoring.voxkube.io/<label>` on a `VoxNode` become label `<label>` on that machine's targets in every `VoxDiscovery` of its cluster (see [`VoxDiscovery.spec.endpointLabels`](#voxdiscovery)).
 
@@ -673,7 +673,7 @@ Labels `monitoring.voxkube.io/<label>` on a `VoxNode` become label `<label>` on 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `environment` | string | cluster `defaultEnvironment` | Puppet environment. |
-| `role` | string | – | Top-scope parameter `role`. It also selects Hiera file `roles_<role>.yaml`. |
+| `role` | string | – | Top-scope parameter `role`. It also selects Hiera file `roles_<role>.yaml`. When empty, the certificate's `pp_role` extension is used (see `status.role`), so role-scoped Hiera secrets also work for machines classified by `pp_role` in `csr_attributes.yaml`. |
 | `classes` | []string | – | Classes. |
 | `parameters` | map[string]any (JSON) | – | Extra top-scope parameters (any JSON value). `role`, `voxkube_*` and `noop` override keys of the same name. |
 
@@ -726,10 +726,11 @@ Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap
 
 | `spec.state` | Operator actions | `status.phase` | `Ready` (reason) | Requeue |
 |---|---|---|---|---|
-| `PendingApproval` | Nothing is signed. The message says whether a CSR has arrived. | `PendingCSR` | `False` (`PendingApproval`) | on change |
+| `PendingApproval` | Nothing is signed. The message says whether a CSR has arrived and which `pp_role` it requests; the CSR's extensions are copied to `status.certificateExtensions`. | `PendingCSR` | `False` (`PendingApproval`) | on change |
 | `Active`, no CSR yet | – | `PendingCSR` | `False` (`AwaitingCSR`) | 30 s |
 | `Active`, CSR pending | Signs it (`PUT …/certificate_status/<certname>`), unless `autosignMode: off`. | `Signed` / `PendingCSR` | `True` (`CertificateSigned`) / `False` (`AwaitingManualSigning`) | 30 s while waiting |
-| `Active`, signed, never seen in OpenVox DB | Reconciles certificates, ENC and Hiera. | `Signed` | `True` (`CertificateSigned`) | 5 min |
+| `Active`, signed, never seen in OpenVox DB | Reconciles certificates, ENC and Hiera. | `Signed` | `True` (`CertificateSigned`) | 30 s |
+| `Active`, signed, OpenVox DB query fails | As above; the error is logged and shown in the message. A node already seen keeps `Active` and its last check-in. | `Signed` (`Active` if seen before) | `True` (`DatabaseUnreachable`, or `NodeActive`) | 30 s |
 | `Active`, reporting | Reads `/pdb/query/v4/nodes/<certname>`. | `Active` | `True` (`NodeActive`) | 5 min |
 | `Active`, certificate revoked on the CA | – | `Error` | `False` (`CertificateRevokedOnCA`) | on change |
 | `Revoked` | `PUT …/certificate_status/<certname> {"desired_state":"revoked"}`. The next `VoxCluster` reconcile copies the new CRL to the compilers. | `Revoked` | `True` (`CertificateRevoked`) | on change |
@@ -746,6 +747,8 @@ Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap
 | `phase` | string | See the state machine. |
 | `certificateSigned` | bool | CA state is `signed` (always `true` with `ca.enabled: false`). |
 | `certificateFingerprint` | string | Fingerprint reported by the CA. |
+| `certificateExtensions` | map[string]string | Puppet extensions of the pending CSR, then of the signed certificate (re-read when the fingerprint changes), e.g. `pp_role`, `pp_datacenter`. Registered extensions by name, site-specific ones (`1.3.6.1.4.1.34380.1.2.*`) by OID. `pp_preshared_key` is never shown. |
+| `role` | string | Effective role: `spec.classification.role`, else `certificateExtensions.pp_role`. Passed to Puppet as `$role`. |
 | `caCleaned` / `puppetDBDeactivated` | bool | `true` after `Decommissioned`. |
 | `readyCertificates` | int32 | Requested certificates whose Secret has `tls.crt` and `tls.key`. |
 | `lastReportStatus` | string | `latest_report_status` from OpenVox DB (`changed`, `unchanged`, `failed`). |
@@ -880,6 +883,7 @@ All CA and DB calls use mTLS with `ca.crt`, `tls.crt` and `tls.key` from `<clust
 | List CSRs and certificates (auto-create) | `GET {caURL}/puppet-ca/v1/certificate_statuses/any_key` |
 | Clean | `PUT {caURL}/puppet-ca/v1/clean` with `{"certnames":["…"]}` |
 | CRL sync | `GET {caURL}/puppet-ca/v1/certificate_revocation_list/ca` |
+| Certificate extensions | `GET {caURL}/puppet-ca/v1/certificate_request/{certname}` (pending), `GET {caURL}/puppet-ca/v1/certificate/{certname}` (signed) |
 | Node status | `GET {databaseURL}/pdb/query/v4/nodes/{certname}` |
 | Deactivate node | `POST {databaseURL}/pdb/cmd/v1` (`deactivate node`, v3) |
 | Discovery | `GET {databaseURL}/pdb/query/v4?query=<PQL>` |

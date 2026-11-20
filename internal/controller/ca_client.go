@@ -48,6 +48,10 @@ type OpenVoxCAClient interface {
 	CleanNode(ctx context.Context, caBaseURL, certname string) error
 	// FetchCRL downloads the current CA certificate revocation list (PEM).
 	FetchCRL(ctx context.Context, caBaseURL string) ([]byte, error)
+	// GetCertificatePEM downloads certname's signed certificate (PEM), or returns ErrCertNotFound.
+	GetCertificatePEM(ctx context.Context, caBaseURL, certname string) ([]byte, error)
+	// GetCertificateRequestPEM downloads certname's pending CSR (PEM), or returns ErrCertNotFound.
+	GetCertificateRequestPEM(ctx context.Context, caBaseURL, certname string) ([]byte, error)
 }
 
 // HTTPCAClient implements OpenVoxCAClient over HTTPS.
@@ -249,6 +253,43 @@ func (c *HTTPCAClient) FetchCRL(ctx context.Context, caBaseURL string) ([]byte, 
 	}
 	if !bytes.Contains(body, []byte("BEGIN X509 CRL")) {
 		return nil, fmt.Errorf("CA CRL download returned no PEM CRL")
+	}
+	return body, nil
+}
+
+// GetCertificatePEM implements OpenVoxCAClient (GET /puppet-ca/v1/certificate/<certname>).
+func (c *HTTPCAClient) GetCertificatePEM(ctx context.Context, caBaseURL, certname string) ([]byte, error) {
+	return c.fetchPEM(ctx, caBaseURL, "/puppet-ca/v1/certificate/"+url.PathEscape(certname), "certificate "+certname)
+}
+
+// GetCertificateRequestPEM implements OpenVoxCAClient (GET /puppet-ca/v1/certificate_request/<certname>).
+func (c *HTTPCAClient) GetCertificateRequestPEM(ctx context.Context, caBaseURL, certname string) ([]byte, error) {
+	return c.fetchPEM(ctx, caBaseURL, "/puppet-ca/v1/certificate_request/"+url.PathEscape(certname), "certificate request "+certname)
+}
+
+func (c *HTTPCAClient) fetchPEM(ctx context.Context, caBaseURL, path, what string) ([]byte, error) {
+	if caBaseURL == "" {
+		return nil, fmt.Errorf("CA URL is not known yet")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, caURL(caBaseURL, path), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "text/plain")
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, ErrCertNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CA %s returned HTTP %d: %s", what, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	return body, nil
 }
