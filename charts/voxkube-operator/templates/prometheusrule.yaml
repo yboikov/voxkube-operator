@@ -1,0 +1,33 @@
+{{- if and .Values.metrics.enabled .Values.metrics.prometheusRule.enabled -}}
+{{- $r := .Values.metrics.prometheusRule -}}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "voxkube-operator.fullname" . }}-puppet-runs
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "voxkube-operator.labels" . | nindent 4 }}
+    {{- with $r.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: voxkube-puppet-runs
+      rules:
+        - alert: PuppetRunFailed
+          expr: voxkube_node_last_report_failed{ {{- $r.selector -}} } == 1
+          for: {{ $r.failedFor }}
+          labels:
+            severity: {{ $r.severity }}
+          annotations:
+            summary: "Puppet run failed on {{ "{{" }} $labels.certname {{ "}}" }}"
+            description: "The latest Puppet run of {{ "{{" }} $labels.certname {{ "}}" }} (role {{ "{{" }} $labels.role {{ "}}" }}) failed. Check the run on the machine with `puppet agent -t`."
+        - alert: PuppetNodeNotReporting
+          expr: (time() - voxkube_node_last_seen_timestamp_seconds{ {{- $r.selector -}} }) > {{ $r.notReportingSeconds }}
+          for: 5m
+          labels:
+            severity: {{ $r.severity }}
+          annotations:
+            summary: "{{ "{{" }} $labels.certname {{ "}}" }} hasn't reported to Puppet for {{ "{{" }} $value | humanizeDuration {{ "}}" }}"
+            description: "No report, facts or catalog from {{ "{{" }} $labels.certname {{ "}}" }} reached OpenVox DB within {{ $r.notReportingSeconds }}s. The agent may be stopped, broken, or unable to reach the compilers."
+{{- end }}

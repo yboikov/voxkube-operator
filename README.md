@@ -353,6 +353,28 @@ kubectl -n openvox get servicemonitor puppet-node-exporter -o yaml
 # Then query: up{namespace="openvox", job="puppet-node-exporter"}
 ```
 
+#### Alerts for failed or missing Puppet runs
+
+The operator exports the Puppet run state of every `VoxNode` as metrics, read from OpenVox DB, so you are alerted when a run fails or a machine stops reporting, with nothing extra on the machines. Turn on the ServiceMonitor and the bundled alert rules in the operator's chart:
+
+```yaml
+# values for the voxkube-operator chart
+metrics:
+  serviceMonitor:
+    enabled: true
+  prometheusRule:
+    enabled: true
+    notReportingSeconds: 7200   # PuppetNodeNotReporting after 2 h without a check-in
+    failedFor: 10m              # PuppetRunFailed once the latest run has been failed for 10 min
+```
+
+| Alert | Fires when |
+|---|---|
+| `PuppetRunFailed` | The latest run of an `Active` node failed (`voxkube_node_last_report_failed == 1`). Clears with the next successful run. |
+| `PuppetNodeNotReporting` | An `Active` node sent no report, facts or catalog for `notReportingSeconds`. Catches stopped or broken agents. |
+
+The VoxNode labels `monitoring.voxkube.io/<label>` are copied onto the metrics, so a machine muted with `monitoring.voxkube.io/alerts=false` is skipped by both alerts (the default `selector` is `alerts!="false"`). The operator's namespace must be covered by your Prometheus (on OpenShift: user workload monitoring, so not an `openshift-*` namespace).
+
 ---
 
 ## API Reference (`#api-reference`)
@@ -889,6 +911,18 @@ All CA and DB calls use mTLS with `ca.crt`, `tls.crt` and `tls.key` from `<clust
 | Discovery | `GET {databaseURL}/pdb/query/v4?query=<PQL>` |
 | GitHub App token | `POST {apiBaseURL}/app/installations/{id}/access_tokens` |
 | Git poll | `GET {remote}/info/refs?service=git-upload-pack` |
+
+### Operator metrics
+
+Served on the operator's metrics endpoint (`:8080/metrics`; chart: `metrics.*`), next to the standard controller-runtime metrics. Built from `VoxNode` status at scrape time.
+
+| Metric | Value | Present for |
+|---|---|---|
+| `voxkube_node_active` | `1` if `spec.state` is `Active`, else `0` | every VoxNode |
+| `voxkube_node_last_report_failed` | `1` if `status.lastReportStatus` is `failed`, else `0` | `Active` VoxNodes with a report |
+| `voxkube_node_last_seen_timestamp_seconds` | `status.lastSeenTime` as Unix time | `Active` VoxNodes seen in OpenVox DB |
+
+Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `state`, plus every VoxNode label `monitoring.voxkube.io/<label>` as `<label>` (names that aren't valid Prometheus label names, are reserved, or clash with the fixed labels are skipped; a label missing on a node is empty). The values refresh as often as the VoxNode controller reads OpenVox DB (every 5 min, 30 s while waiting for a first run).
 
 ### Operator command-line flags
 

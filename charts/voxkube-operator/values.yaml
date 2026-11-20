@@ -38,10 +38,21 @@ metrics:
   port: 8080
   service:
     enabled: true
+  # ServiceMonitor for the operator's metrics, including the per-VoxNode Puppet run metrics (voxkube_node_*).
   serviceMonitor:
     enabled: false
     interval: 30s
     labels: {}
+  # Alert rules for failed or missing Puppet runs, built on the voxkube_node_* metrics.
+  prometheusRule:
+    enabled: false
+    labels: {}
+    severity: warning
+    # Label matchers applied to both alerts; the default skips machines muted with
+    # the VoxNode label monitoring.voxkube.io/alerts=false.
+    selector: 'alerts!="false"'
+    failedFor: 10m
+    notReportingSeconds: 7200
 
 nodeSelector: {}
 tolerations: []

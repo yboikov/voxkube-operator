@@ -47,6 +47,13 @@ jobs:
         run: |
           helm lint charts/voxkube-operator
           helm template voxkube charts/voxkube-operator --set cluster.enabled=true > /dev/null
+          helm template voxkube charts/voxkube-operator \
+            --set metrics.serviceMonitor.enabled=true --set metrics.prometheusRule.enabled=true > /dev/null
+
+      - name: Helm unit tests
+        run: |
+          helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.7.2
+          helm unittest charts/voxkube-operator
 
   # Images are pushed only for releases (v* tags) and by the weekly rebuild of the latest release.
   # Pull requests and manual runs build without pushing; pushes to main only run lint and tests.

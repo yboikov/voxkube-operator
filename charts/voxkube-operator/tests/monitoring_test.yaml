@@ -1,0 +1,41 @@
+suite: Operator metrics ServiceMonitor and Puppet run alerts
+templates:
+  - templates/servicemonitor.yaml
+  - templates/prometheusrule.yaml
+tests:
+  - it: renders nothing by default
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: templates/servicemonitor.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/prometheusrule.yaml
+
+  - it: renders a ServiceMonitor for the metrics port
+    set:
+      metrics.serviceMonitor.enabled: true
+    template: templates/servicemonitor.yaml
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: spec.endpoints[0].port
+          value: metrics
+
+  - it: renders both alerts with the mute selector
+    set:
+      metrics.prometheusRule.enabled: true
+    template: templates/prometheusrule.yaml
+    asserts:
+      - isKind:
+          of: PrometheusRule
+      - equal:
+          path: spec.groups[0].rules[0].expr
+          value: voxkube_node_last_report_failed{alerts!="false"} == 1
+      - equal:
+          path: spec.groups[0].rules[1].alert
+          value: PuppetNodeNotReporting
+      - matchRegex:
+          path: spec.groups[0].rules[0].annotations.summary
+          pattern: '\{\{ \$labels\.certname \}\}'

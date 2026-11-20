@@ -10,6 +10,15 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [0.2.6]
 
+### Added
+- Puppet run metrics per VoxNode on the operator's metrics endpoint: `voxkube_node_active`,
+  `voxkube_node_last_report_failed` and `voxkube_node_last_seen_timestamp_seconds`, labelled with the node's
+  certname, role and its `monitoring.voxkube.io/*` labels.
+- Chart: the ServiceMonitor for the operator's metrics (`metrics.serviceMonitor.enabled` existed but rendered
+  nothing) and optional alert rules `PuppetRunFailed` and `PuppetNodeNotReporting`
+  (`metrics.prometheusRule.enabled`), which skip machines muted with `monitoring.voxkube.io/alerts=false`.
+- CI runs the chart's helm-unittest suite.
+
 ### Fixed
 - A compiler could run without any Puppet code. If GitHub was unreachable when a pod started, g10k-init deployed
   nothing but reported success, and the failed clone left a broken mirror in g10k's cache, so every later sync
