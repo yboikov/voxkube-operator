@@ -52,7 +52,7 @@ jobs:
 
       - name: Helm unit tests
         run: |
-          helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.7.2
+          helm plugin install https://github.com/helm-unittest/helm-unittest --version v0.7.2 --verify=false
           helm unittest charts/voxkube-operator
 
   # Images are pushed only for releases (v* tags) and by the weekly rebuild of the latest release.
