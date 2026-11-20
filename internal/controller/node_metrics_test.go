@@ -13,7 +13,7 @@ import (
 
 func TestNodeMetricsCollector(t *testing.T) {
 	seen := metav1.NewTime(time.Unix(1795180000, 0))
-	node := func(name string, state openvoxv1alpha1.NodeState, report string, lastSeen *metav1.Time, labels map[string]string) *openvoxv1alpha1.VoxNode {
+	node := func(name string, state openvoxv1alpha1.VoxNodeState, report string, lastSeen *metav1.Time, labels map[string]string) *openvoxv1alpha1.VoxNode {
 		return &openvoxv1alpha1.VoxNode{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "openvox", Labels: labels},
 			Spec:       openvoxv1alpha1.VoxNodeSpec{ClusterRef: "openvox", Certname: name + ".example.com", State: state},
