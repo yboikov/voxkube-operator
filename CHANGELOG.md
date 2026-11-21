@@ -8,6 +8,13 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.9]
+
+Git branch selection and PSK autosign hardening (#46, #39). No breaking changes.
+
+**Upgrade notes:** the CA pod rolls once (new autosign script) and the compilers roll once (new
+`VOXKUBE_GIT_BRANCHES` variable in the g10k containers). Code revisions are unchanged when `branches` is empty.
+
 ### Security
 - The PSK autosign script parsed `openssl req -text` output with `sed`, which depended on the OpenSSL version and on
   how the key was encoded. It now runs in Puppet's Ruby: the CSR is decoded as ASN.1, its signature is verified,
