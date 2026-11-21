@@ -770,7 +770,7 @@ parameters:
 
 Removing an entry from `certificates` deletes its `Certificate` (only `Certificate`s the `VoxNode` controls).
 
-The generated name is `voxnode-cert-<a>-<b>`, where `<a>` and `<b>` are `metadata.name` and `name`, each lowercased, cut at the first `.`, with every character outside `[a-z0-9-]` replaced by `-`. The `VoxNode` controller watches these Secrets, so `readyCertificates` updates as soon as cert-manager issues them.
+The generated name is `voxnode-cert-<a>-<b>`, where `<a>` and `<b>` are `metadata.name` and `name`, each lowercased with every character outside `[a-z0-9-]` (dots included) replaced by `-`. When the `VoxNode` name contains a dot, or the result would exceed 63 characters, the name is shortened if needed and ends in `-<hash>` of the original names, so `web01.us.example.com` and `web01.eu.example.com` never collide (since 0.2.8; earlier versions cut the name at the first dot). The `VoxNode` controller watches these Secrets, so `readyCertificates` updates as soon as cert-manager issues them.
 
 Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap` in your code):
 
@@ -896,7 +896,7 @@ All of these are owned by the `VoxDiscovery` and labelled `app.kubernetes.io/nam
 | Kind | Name | Notes |
 |---|---|---|
 | Service | `<vd>` | Headless (`clusterIP: None`), no selector. Also labelled with `serviceMonitor.targetLabels`. |
-| EndpointSlice | `<vd>-<n>` (IPv4), `<vd>-v6-<n>` (IPv6); `<vd>-<hash>-<n>`, `<vd>-<hash>-v6-<n>` for machines with per-target labels | One set of slices per distinct per-target label set, labelled `label.voxkube.io/<label>=<value>`. At most 100 endpoints each, sorted by certname. `hostname` = first DNS label of the certname, `nodeName` = certname. Surplus slices are pruned. |
+| EndpointSlice | `<vd>-<n>` (IPv4), `<vd>-v6-<n>` (IPv6); `<vd>-<hash>-<n>`, `<vd>-<hash>-v6-<n>` for machines with per-target labels | One set of slices per distinct per-target label set, labelled `label.voxkube.io/<label>=<value>`. At most 100 endpoints each, sorted by certname. `hostname` = the whole certname with dots turned into `-` (at most 63 characters, ending in a hash when shortened), `nodeName` = certname. Surplus slices are pruned. |
 | ServiceMonitor | `<vd>` | When `serviceMonitor.enabled`. Always `serviceDiscoveryRole: EndpointSlice`, plus a `labelmap` relabeling for the per-target labels. |
 | Secret | `<vd>-prometheus-scraper-tls` | When `tls.enabled` and `mode: openvoxCA`. |
 
@@ -978,7 +978,7 @@ Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `
 | `--metrics-cert-dir` | – | Directory with `tls.crt` and `tls.key` for metrics. |
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--leader-elect` | `false` | Enable leader election (the Helm chart sets `leaderElect: true`). |
-| `--watch-namespace` | – (all) | Restrict the operator to one namespace. |
+| `--watch-namespace` | – (all) | Restrict the operator to one namespace. Secrets are never cached in either mode: the operator watches Secret metadata only and reads the Secrets it needs from the API server, so a cluster-wide operator doesn't hold the cluster's Secrets in memory. |
 | `--node-metric-labels` | `alerts` | Comma-separated `monitoring.voxkube.io/<name>` VoxNode labels exported on the `voxkube_node_*` metrics. |
 
 Standard controller-runtime `--zap-*` logging flags are also accepted.

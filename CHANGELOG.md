@@ -28,6 +28,20 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   be Go durations; VoxNode `certname` must be a valid lowercase certname; `certname` and `clusterRef` are
   immutable (#34).
 
+### Changed (naming, RBAC, cache)
+- **Breaking for FQDN-named VoxNodes:** generated cert-manager Certificate/Secret names keep the whole VoxNode name
+  (dots → `-`) plus a hash, so `web01.us.example.com` and `web01.eu.example.com` no longer collide on
+  `voxnode-cert-web01-…`. Certificates of VoxNodes whose name contains a dot are re-issued once under the new name
+  (the old Certificate is deleted); Hiera keys don't change. Names without dots are unchanged. VoxDiscovery
+  endpoint hostnames keep the whole certname too (#30).
+- The ClusterRole no longer grants `batch/jobs`, `serviceaccounts` or access to cert-manager Issuers (#28).
+- Secrets are no longer cached: the operator watches their metadata only and reads them from the API server,
+  Hiera Secrets are listed with a server-side label selector, and unrelated Secrets (Helm releases, tokens) no
+  longer trigger a VoxCluster reconcile (#28).
+- `enc.sh` refuses empty certnames and ones containing `/`, `..` or spaces.
+- Switching `code.mode` away from `git` deletes the g10k ConfigMap and the GitHub App token Secret; switching
+  `authType` away from `githubApp` deletes the token Secret.
+
 ### Fixed (duplicates)
 - Two VoxNodes with the same certname silently overwrote each other's ENC and Hiera data, and deleting either one
   revoked the certificate of the machine both described. The oldest now owns the certname; others report

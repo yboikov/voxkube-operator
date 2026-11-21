@@ -68,6 +68,11 @@ update that section in the same change. Never document a field as working unless
   - A (cluster, certname) is owned by its oldest VoxNode (`certnameOwner`, `servedVoxNodes`). Duplicates never
     sign, revoke, clean or classify, and are deleted without cleanup. `*.svc` certnames are reserved
     (`reservedCertname`): OpenVox DB's allowlist trusts the service certname.
+  - Secrets are never cached (`DisableFor` in `cmd/main.go`). Watch them with `builder.OnlyMetadata`, list them with a
+    label selector (`client.MatchingLabels`), and keep Secret mappers selective (`clustersForSecret`): a Secret
+    watch must never enqueue on unrelated Secrets such as Helm releases.
+  - Generated object names derived from certnames keep the whole FQDN (`dnsLabel`, `certManagerDefaultName`);
+    never cut at the first dot (two machines can share a short hostname).
   - Required-field combinations are CEL rules on the CRD types (`+kubebuilder:validation:XValidation`). Keep
     controllers tolerant anyway (older objects predate the rules).
   - The external ENC (`enc.sh`, `externalHttp`) falls back to the default only on HTTP 404. Any other failure
