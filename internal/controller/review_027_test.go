@@ -170,13 +170,15 @@ func TestDeletingVoxNodeLeavesENCWhileCleanupPending(t *testing.T) {
 	node.Finalizers = []string{VoxNodeFinalizer}
 	r, c, f := newLifecycleFixture(t, node, true)
 	f.caDown = true
-	// A stale ENC entry from before the deletion.
-	stale := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "openvox-enc-nodes", Namespace: "openvox"},
-		Data: map[string]string{"web01.example.com.yaml": "environment: production\n"}}
-	if err := c.Create(ctx, stale); err != nil {
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: web01Key}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: web01Key}); err != nil {
+	// The cleanup is pending, but the VoxCluster controller (the ENC's only writer) already leaves the node out.
+	cluster := &openvoxv1alpha1.VoxCluster{}
+	if err := c.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "openvox"}, cluster); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&VoxClusterReconciler{Client: c, Scheme: r.Scheme}).reconcileENCConfigMap(ctx, cluster); err != nil {
 		t.Fatal(err)
 	}
 	cm := &corev1.ConfigMap{}

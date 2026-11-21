@@ -85,8 +85,12 @@ func NewMTLSHTTPClient(caCertPEM, clientCertPEM, clientKeyPEM []byte) (*http.Cli
 		tlsCfg.Certificates = []tls.Certificate{cert}
 	}
 	return &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: tlsCfg},
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig:     tlsCfg,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     90 * time.Second,
+		},
 	}, nil
 }
 

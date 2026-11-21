@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -601,11 +602,18 @@ func (r *VoxClusterReconciler) reconcileAutoscaling(ctx context.Context, cluster
 	if err := controllerutil.SetControllerReference(cluster, desired, r.Scheme); err != nil {
 		return err
 	}
+	h := specHash(desired.Spec)
+	desired.Annotations = map[string]string{AnnotationSpecHash: h}
 	if !found {
 		return r.Create(ctx, desired)
 	}
+	// The API server defaults parts of the HPA spec (e.g. behavior), so compare what we rendered, not the live spec.
+	if existing.Annotations[AnnotationSpecHash] == h && reflect.DeepEqual(existing.Labels, desired.Labels) {
+		return nil
+	}
 	existing.Spec = desired.Spec
 	existing.Labels = desired.Labels
+	existing.Annotations = mergeStringMaps(existing.Annotations, desired.Annotations)
 	return r.Update(ctx, existing)
 }
 

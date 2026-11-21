@@ -3,10 +3,13 @@ package controller
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -224,7 +227,55 @@ func clusterMTLSClient(ctx context.Context, c client.Reader, cluster *openvoxv1a
 	if err := c.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecretName(cluster)}, sec); err != nil {
 		return nil, err
 	}
-	return NewMTLSHTTPClient(sec.Data["ca.crt"], sec.Data["tls.crt"], sec.Data["tls.key"])
+	return mtlsClients.get(cluster.Namespace+"/"+cluster.Name, sec.Data["ca.crt"], sec.Data["tls.crt"], sec.Data["tls.key"])
+}
+
+// mtlsClientCache keeps one mTLS *http.Client per VoxCluster so connections are reused across reconciles.
+// An entry is rebuilt when the credentials change; the old client's idle connections are closed.
+type mtlsClientCache struct {
+	mu      sync.Mutex
+	entries map[string]mtlsClientEntry
+}
+
+type mtlsClientEntry struct {
+	hash   string
+	client *http.Client
+}
+
+var mtlsClients = &mtlsClientCache{entries: map[string]mtlsClientEntry{}}
+
+func (c *mtlsClientCache) get(key string, caPEM, certPEM, keyPEM []byte) (*http.Client, error) {
+	h := sha256.New()
+	for _, b := range [][]byte{caPEM, certPEM, keyPEM} {
+		h.Write(b)
+		h.Write([]byte{0})
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[key]; ok && e.hash == sum {
+		return e.client, nil
+	}
+	cl, err := NewMTLSHTTPClient(caPEM, certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	if old, ok := c.entries[key]; ok {
+		old.client.CloseIdleConnections()
+	}
+	c.entries[key] = mtlsClientEntry{hash: sum, client: cl}
+	return cl, nil
+}
+
+// forget drops a cluster's client (on VoxCluster deletion).
+func (c *mtlsClientCache) forget(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[key]; ok {
+		e.client.CloseIdleConnections()
+		delete(c.entries, key)
+	}
 }
 
 // resolveCAClient returns base bound to the cluster's mTLS credentials when base is the HTTP implementation
