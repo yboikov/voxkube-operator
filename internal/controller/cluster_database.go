@@ -150,6 +150,9 @@ gc-interval = %d
 
 	// Plain HTTP has no access control in OpenVox DB (any client could read all facts and submit commands), so it
 	// only listens on localhost, for the readiness probe. Everything else uses mTLS on 8081.
+	// mTLS alone admits any certificate the CA signed, i.e. every agent, which could then read every node's facts
+	// and catalogs or deactivate nodes. The allowlist admits only the compilers and the operator (both use the
+	// service certname) plus spec.database.certificateAllowlist; the CRL rejects revoked certificates.
 	jettyIni := `[jetty]
 host = 127.0.0.1
 port = 8080
@@ -158,13 +161,18 @@ ssl-port = 8081
 ssl-key = /etc/puppetlabs/puppetdb/ssl/tls.key
 ssl-cert = /etc/puppetlabs/puppetdb/ssl/tls.crt
 ssl-ca-cert = /etc/puppetlabs/puppetdb/ssl/ca.crt
+ssl-crl-path = /etc/puppetlabs/puppetdb/ssl/crl.pem
 access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
+
+[puppetdb]
+certificate-allowlist = /etc/puppetlabs/puppetdb/certificate-allowlist
 `
+	allowlist := dbCertificateAllowlist(cluster)
 
 	dbCMName := fmt.Sprintf("%s-db-config", cluster.Name)
 	dbCM := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: dbCMName, Namespace: cluster.Namespace, Labels: voxClusterLabels(cluster.Name, "db")},
-		Data:       map[string]string{"jetty.ini": jettyIni},
+		Data:       map[string]string{"jetty.ini": jettyIni, "certificate-allowlist": allowlist},
 	}
 	if err := controllerutil.SetControllerReference(cluster, dbCM, r.Scheme); err != nil {
 		return err
@@ -205,8 +213,9 @@ access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: voxClusterLabels(cluster.Name, "db"),
 					Annotations: map[string]string{
-						AnnotationConfigHash: hashStrings(map[string]string{"jetty.ini": jettyIni, "database.ini": databaseIni}),
-						AnnotationTLSHash:    st.tlsHash,
+						AnnotationConfigHash: hashStrings(map[string]string{"jetty.ini": jettyIni, "database.ini": databaseIni,
+							"certificate-allowlist": allowlist}),
+						AnnotationTLSHash: st.dbTLSHash,
 					},
 				},
 				Spec: corev1.PodSpec{
@@ -222,14 +231,16 @@ access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "db-database", MountPath: "/etc/puppetlabs/puppetdb/conf.d/database.ini", SubPath: "database.ini", ReadOnly: true},
 							{Name: "db-config", MountPath: "/etc/puppetlabs/puppetdb/conf.d/jetty.ini", SubPath: "jetty.ini", ReadOnly: true},
-							{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppetdb/ssl", ReadOnly: true},
+							{Name: "db-config", MountPath: "/etc/puppetlabs/puppetdb/certificate-allowlist", SubPath: "certificate-allowlist", ReadOnly: true},
+							{Name: "tls", MountPath: "/etc/puppetlabs/puppetdb/ssl", ReadOnly: true},
 							{Name: "db-vardir", MountPath: "/opt/puppetlabs/server/data/puppetdb"},
 						},
 					}},
 					Volumes: []corev1.Volume{
 						{Name: "db-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: dbCMName}}}},
 						{Name: "db-database", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: dbSecName}}},
-						{Name: "ca-tls", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: st.caSecretName}}},
+						// OpenVox DB's own certificate, CA certificate and CRL: never the CA key (<cluster>-ca-tls).
+						{Name: "tls", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: dbSecretName(cluster)}}},
 						{Name: "db-vardir", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 					},
 				},
@@ -368,4 +379,19 @@ func (r *VoxClusterReconciler) reconcileBuiltinPostgres(ctx context.Context, clu
 		ready = current.Status.ReadyReplicas > 0
 	}
 	return fmt.Sprintf("%s.%s.svc.cluster.local", pgSvcName, cluster.Namespace), ready, nil
+}
+
+// dbCertificateAllowlist lists the certnames OpenVox DB accepts over mTLS: the service certname (compilers and the
+// operator) plus spec.database.certificateAllowlist, one per line.
+func dbCertificateAllowlist(cluster *openvoxv1alpha1.VoxCluster) string {
+	names := []string{serviceCertname(cluster)}
+	seen := map[string]bool{names[0]: true}
+	for _, n := range cluster.Spec.Database.CertificateAllowlist {
+		n = strings.TrimSpace(n)
+		if n != "" && !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	return strings.Join(names, "\n") + "\n"
 }

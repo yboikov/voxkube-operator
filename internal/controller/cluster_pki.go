@@ -17,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	openvoxv1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
 )
@@ -41,9 +42,21 @@ func serviceCertname(cluster *openvoxv1alpha1.VoxCluster) string {
 	return fmt.Sprintf("%s.%s.svc", cluster.Name, cluster.Namespace)
 }
 
-// serviceDNSNames lists every DNS SAN of the shared service certificate: the compiler, CA and DB Services in all
-// in-cluster forms, plus the configured external names.
-func serviceDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
+// serverSecretName and dbSecretName name the workload TLS Secrets of the compilers and OpenVox DB. Unlike
+// <cluster>-ca-tls they hold no CA key and their certificates carry no pp_cli_auth, so a compromised compiler or
+// DB pod can neither forge agent certificates nor use the CA admin API.
+func serverSecretName(cluster *openvoxv1alpha1.VoxCluster) string {
+	return cluster.Name + "-server-tls"
+}
+func dbSecretName(cluster *openvoxv1alpha1.VoxCluster) string { return cluster.Name + "-db-tls" }
+
+// dbCertname is the certname (CN) of the OpenVox DB certificate.
+func dbCertname(cluster *openvoxv1alpha1.VoxCluster) string {
+	return fmt.Sprintf("%s-db.%s.svc", cluster.Name, cluster.Namespace)
+}
+
+// dnsNames lists the DNS SANs for the given Services (all in-cluster forms) and endpoints (external names).
+func dnsNames(cluster *openvoxv1alpha1.VoxCluster, services []string, endpoints ...openvoxv1alpha1.EndpointNetworkingSpec) []string {
 	ns := cluster.Namespace
 	var names []string
 	seen := map[string]bool{}
@@ -53,13 +66,13 @@ func serviceDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
 			names = append(names, n)
 		}
 	}
-	for _, svc := range []string{cluster.Name, cluster.Name + "-ca", cluster.Name + "-db"} {
+	for _, svc := range services {
 		add(svc)
 		add(svc + "." + ns)
 		add(svc + "." + ns + ".svc")
 		add(svc + "." + ns + ".svc.cluster.local")
 	}
-	for _, ep := range []openvoxv1alpha1.EndpointNetworkingSpec{cluster.Spec.Networking.Server, cluster.Spec.Networking.CA} {
+	for _, ep := range endpoints {
 		add(ep.ExternalHostname)
 		if rt := ep.OpenShiftRoute; rt != nil && rt.Enabled {
 			add(rt.Host)
@@ -71,8 +84,25 @@ func serviceDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
 	return names
 }
 
-// reconcileCAPKI makes sure <cluster>-ca-tls holds the CA (generated once, kept forever) and a valid service
-// certificate whose SANs match the spec (renewed 30 days before expiry or when SANs change).
+// caDNSNames are the SANs of the CA's own certificate (in <cluster>-ca-tls).
+func caDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
+	return dnsNames(cluster, []string{cluster.Name + "-ca"}, cluster.Spec.Networking.CA)
+}
+
+// serverDNSNames are the SANs of the compilers' certificate.
+func serverDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
+	return dnsNames(cluster, []string{cluster.Name}, cluster.Spec.Networking.Server)
+}
+
+// dbDNSNames are the SANs of the OpenVox DB certificate.
+func dbDNSNames(cluster *openvoxv1alpha1.VoxCluster) []string {
+	return dnsNames(cluster, []string{cluster.Name + "-db"})
+}
+
+// reconcileCAPKI makes sure <cluster>-ca-tls holds the CA (generated once, kept forever) and a valid certificate
+// for the CA endpoint (renewed 30 days before expiry or when SANs change). That certificate carries pp_cli_auth:
+// the operator uses it as its client certificate for the CA admin API and OpenVox DB. Only the CA pod mounts
+// this Secret; compilers and OpenVox DB get their own (reconcileWorkloadTLS).
 // The Secret is deliberately NOT owned by the VoxCluster so that deleting the VoxCluster does not destroy the CA.
 func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (string, string, error) {
 	secName := fmt.Sprintf("%s-ca-tls", cluster.Name)
@@ -124,10 +154,10 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 		changed = true
 	}
 
-	if renew, why := LeafNeedsRenewal(data["tls.crt"], data["ca.crt"], serviceDNSNames(cluster), leafRenewBefore); renew {
+	if renew, why := LeafNeedsRenewal(data["tls.crt"], data["ca.crt"], caDNSNames(cluster), leafRenewBefore); renew {
 		certPEM, keyPEM, err := IssueLeafCertificate(data["ca.crt"], data["ca.key"], LeafCertOptions{
 			CommonName: serviceCertname(cluster),
-			DNSNames:   serviceDNSNames(cluster),
+			DNSNames:   caDNSNames(cluster),
 			Duration:   serviceCertTTL,
 			CLIAuth:    true, // the operator uses this certificate for the CA admin API
 		})
@@ -181,7 +211,61 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 	return secName, hashBytes(data["tls.crt"]), nil
 }
 
-// syncCRL copies the CA's current CRL into <cluster>-ca-tls (key crl.pem) so that compilers reject revoked agents.
+// reconcileWorkloadTLS keeps a workload TLS Secret (owned by the VoxCluster) with its own leaf certificate
+// (no pp_cli_auth), the CA certificate and the current CRL, all taken from <cluster>-ca-tls. The CA key is never
+// copied. It returns a hash of the certificate; pods roll when it changes (CRL updates are reloaded in place).
+func (r *VoxClusterReconciler) reconcileWorkloadTLS(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster,
+	component, secName, commonName string, sans []string) (string, error) {
+	ca := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecretName(cluster)}, ca); err != nil {
+		return "", err
+	}
+	data := map[string][]byte{}
+	existing := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: secName}, existing); err == nil {
+		for _, k := range []string{"tls.crt", "tls.key", "tls.pub"} {
+			data[k] = existing.Data[k]
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return "", err
+	}
+	if renew, why := LeafNeedsRenewal(data["tls.crt"], ca.Data["ca.crt"], sans, leafRenewBefore); renew {
+		certPEM, keyPEM, err := IssueLeafCertificate(ca.Data["ca.crt"], ca.Data["ca.key"], LeafCertOptions{
+			CommonName: commonName,
+			DNSNames:   sans,
+			Duration:   serviceCertTTL,
+		})
+		if err != nil {
+			return "", err
+		}
+		pub, err := ExtractPublicKeyPEM(keyPEM)
+		if err != nil {
+			return "", err
+		}
+		data["tls.crt"], data["tls.key"], data["tls.pub"] = certPEM, keyPEM, pub
+		if len(existing.Data) > 0 {
+			r.event(cluster, corev1.EventTypeNormal, "CertificateIssued", fmt.Sprintf("Issued a new %s certificate: %s", component, why))
+		}
+	}
+	data["ca.crt"] = ca.Data["ca.crt"]
+	data["crl.pem"] = ca.Data["crl.pem"]
+
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: secName, Namespace: cluster.Namespace, Labels: voxClusterLabels(cluster.Name, component)},
+		Type:       corev1.SecretTypeTLS,
+		Data:       data,
+	}
+	if err := controllerutil.SetControllerReference(cluster, sec, r.Scheme); err != nil {
+		return "", err
+	}
+	if err := r.createOrUpdateSecret(ctx, sec); err != nil {
+		return "", err
+	}
+	return hashBytes(data["tls.crt"]), nil
+}
+
+// syncCRL copies the CA's current CRL into <cluster>-ca-tls (key crl.pem); reconcileWorkloadTLS passes it on to the
+// compilers and OpenVox DB so that they reject revoked agents.
 func (r *VoxClusterReconciler) syncCRL(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, caClient OpenVoxCAClient, caURL, secName string) error {
 	crlPEM, err := caClient.FetchCRL(ctx, caURL)
 	if err != nil {
@@ -221,7 +305,8 @@ func verifyCRL(crlPEM, caCertPEM []byte) error {
 	return crl.CheckSignatureFrom(caCert)
 }
 
-// clusterMTLSClient builds an HTTP client that trusts the cluster CA and presents the service certificate.
+// clusterMTLSClient builds an HTTP client that trusts the cluster CA and presents the operator's certificate
+// (the pp_cli_auth certificate in <cluster>-ca-tls).
 func clusterMTLSClient(ctx context.Context, c client.Reader, cluster *openvoxv1alpha1.VoxCluster) (*http.Client, error) {
 	sec := &corev1.Secret{}
 	if err := c.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecretName(cluster)}, sec); err != nil {

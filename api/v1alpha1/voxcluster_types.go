@@ -239,6 +239,10 @@ type ClusterDatabaseSpec struct {
 	// Housekeeping configures automatic PuppetDB node and report TTL cleanup.
 	// +optional
 	Housekeeping DatabaseHousekeepingSpec `json:"housekeeping,omitempty"`
+
+	// CertificateAllowlist lists additional certnames (certificate CNs) allowed to use the OpenVox DB API over mTLS, e.g. a reporting tool. The compilers and the operator are always allowed; agent certificates are not.
+	// +optional
+	CertificateAllowlist []string `json:"certificateAllowlist,omitempty"`
 }
 
 // ClusterPostgresSpec configures PostgreSQL for OpenVox DB.

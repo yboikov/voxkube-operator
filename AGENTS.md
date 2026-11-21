@@ -27,12 +27,15 @@ update that section in the same change. Never document a field as working unless
     (CloudNativePG). Do not add persistence to builtin.
   - The CA Secret `<cluster>-ca-tls` and PVC `<cluster>-ca-data` are **not owned** by the VoxCluster, so the CA
     survives deletion. Do not add owner references to them.
-  - Only the service certificate carries `pp_cli_auth`, encoded as UTF8String. Never put it on other leaf
-    certs (e.g. the Prometheus scraper cert).
+  - Only the certificate in `<cluster>-ca-tls` (CA endpoint + operator client) carries `pp_cli_auth`, encoded as
+    UTF8String. Never put it on other leaf certs (compilers, DB, Prometheus scraper).
+  - `<cluster>-ca-tls` holds the CA key and is mounted **only** into the CA pod. Compilers mount
+    `<cluster>-server-tls` and OpenVox DB `<cluster>-db-tls` (own leaf cert, `ca.crt`, `crl.pem`; never `ca.key`),
+    built by `reconcileWorkloadTLS`. OpenVox DB only accepts certificates in its `certificate-allowlist`.
   - The ENC parameter `noop` from `globalNoop` is advisory; Puppet code must honour it.
   - `puppetserver.conf` keeps the `master-*` key names that are known to work with the shipped image.
-  - `spec.networking` has two symmetric blocks, `server` (compilers) and `ca`, sharing one service certificate
-    whose SANs are the union of both. Add new exposure options to `EndpointNetworkingSpec`, not as flat fields.
+  - `spec.networking` has two symmetric blocks, `server` (compilers) and `ca`; each feeds the SANs of its own
+    certificate. Add new exposure options to `EndpointNetworkingSpec`, not as flat fields.
   - `VoxDiscovery` publishes targets only as EndpointSlices, so its ServiceMonitor must keep
     `serviceDiscoveryRole: EndpointSlice`. Per-target labels (`endpointLabels`, VoxNode
     `monitoring.voxkube.io/<label>`) are **EndpointSlice labels**: machines are grouped into slices by label set.
