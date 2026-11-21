@@ -75,6 +75,9 @@ update that section in the same change. Never document a field as working unless
     never cut at the first dot (two machines can share a short hostname).
   - Required-field combinations are CEL rules on the CRD types (`+kubebuilder:validation:XValidation`). Keep
     controllers tolerant anyway (older objects predate the rules).
+  - `code.git.branches` must be applied identically in three places: the operator poll (`SelectBranches`), g10k
+    (`filter_regex`, matched against the bare branch name) and `deploy.sh` (`git ls-remote` with `refs/heads/<b>`).
+    With no branches, `RefsHash` must stay byte-for-byte what it was, so upgrades don't roll the compilers.
   - The external ENC (`enc.sh`, `externalHttp`) falls back to the default only on HTTP 404. Any other failure
     exits non-zero so the catalog request fails, rather than compiling the wrong classification.
 

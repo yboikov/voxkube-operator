@@ -125,6 +125,15 @@ spec:
                         - httpsToken
                         - none
                         type: string
+                      branches:
+                        description: Branches limits code delivery to these branches
+                          (Puppet environments). Only they are deployed by g10k, and
+                          only pushes to them roll the compilers or trigger a sidecar
+                          redeploy. Empty means every branch.
+                        items:
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9._/+@-]*$
+                          type: string
+                        type: array
                       credentialsSecretRef:
                         description: |-
                           CredentialsSecretRef names a Secret in the same namespace.

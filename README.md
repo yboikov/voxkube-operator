@@ -18,7 +18,7 @@ Traditionally, a Puppet server lives on hand-built VMs. You sign each new machin
 > **Built for OpenShift.** Every pod runs under the default `restricted-v2` SCC (no root, no fixed UIDs), and **OpenShift Routes are included**: set `openShiftRoute.enabled: true` and the operator creates passthrough Routes for the compilers and the CA, adds their hostnames to the certificates, and reports the URLs agents should use in the `VoxCluster` status (`serverExternalURL`, `caExternalURL`). Agents outside the cluster connect on port 443, with no LoadBalancer or NodePort needed.
 
 > [!TIP]
-> **Puppet code straight from Git, with GitHub App authentication.** Set `code.mode: git` and point it at your control repo: every branch becomes a Puppet environment, deployed by g10k together with its `Puppetfile` modules. Authenticate as a **GitHub App** (the operator exchanges the App's private key for short-lived installation tokens and renews them itself, so there are no personal tokens or deploy keys to rotate), or with an SSH key or HTTPS token. The operator polls the repository, so no inbound webhook through your firewall is needed, and updates the compilers when a branch changes.
+> **Puppet code straight from Git, with GitHub App authentication.** Set `code.mode: git` and point it at your control repo: every branch (or only the ones you list in `branches`) becomes a Puppet environment, deployed by g10k together with its `Puppetfile` modules. Authenticate as a **GitHub App** (the operator exchanges the App's private key for short-lived installation tokens and renews them itself, so there are no personal tokens or deploy keys to rotate), or with an SSH key or HTTPS token. The operator polls the repository, so no inbound webhook through your firewall is needed, and updates the compilers when a branch changes.
 
 ## The components
 
@@ -459,7 +459,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `mode` | string | `git` | `git` \| `pvc` \| `imageVolume` | Code source. If the chosen mode has no source configured (`git` without `git`, `pvc` without `claimName`, `imageVolume` without `image`), a small demo `production` environment is seeded instead, and `CodeReady` reports reason `DemoCode`. |
-| `git` | [`GitCodeSpec`](#voxclusterspeccodegit) | – | – | Control-repo deployed with g10k. Every branch becomes an environment. |
+| `git` | [`GitCodeSpec`](#voxclusterspeccodegit) | – | – | Control-repo deployed with g10k. Every branch (or every branch in `branches`) becomes an environment. |
 | `claimName` | string | – | – | `mode: pvc`: PVC mounted **read-only** at `/etc/puppetlabs/code`. It must contain `environments/`. Use a RWX/ROX volume when running more than one replica. |
 | `image` | string | – | – | `mode: imageVolume`: OCI image mounted read-only at `/etc/puppetlabs/code` (Kubernetes image volumes must be enabled on the cluster). It must contain `environments/`. Changing the reference rolls the compilers. |
 
@@ -468,6 +468,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `remote` | string | – | **required** | Control-repo URL (`https://…` or SSH such as `git@host:org/repo.git`). |
+| `branches` | []string | all branches | each `^[A-Za-z0-9][A-Za-z0-9._/+@-]*$` | Deploy only these branches. g10k gets an anchored `filter_regex` (environments of other branches are purged), `deploy.sh` runs `git ls-remote` for these refs only, and the operator hashes only these branches, so pushes to other branches neither roll the compilers (synchronized mode) nor trigger a sidecar redeploy. `status.observedCommit` is the commit of the first listed branch that exists. If none of them exists: `CodeReady=False` (`GitPollFailed`) and `deploy.sh` fails without touching deployed code. Changing the list rolls the compilers. |
 | `authType` | string | `githubApp` | `githubApp` \| `sshKey` \| `httpsToken` \| `none` | `githubApp` without a `githubApp` block is treated as `none`. |
 | `githubApp` | [`GitHubAppAuthSpec`](#voxclusterspeccodegitgithubapp) | – | – | For `authType: githubApp`. |
 | `credentialsSecretRef` | string | – | – | `sshKey`: Secret with `ssh-privatekey` and optionally `known_hosts` (without it, host keys are accepted on first use). `httpsToken`: Secret with `token` (plus optional `username`, default `x-access-token`) or with `username` + `password`. |
