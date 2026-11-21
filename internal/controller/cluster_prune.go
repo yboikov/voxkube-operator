@@ -65,6 +65,12 @@ func (r *VoxClusterReconciler) pruneDisabledComponents(ctx context.Context, clus
 	if !caEnabled(cluster) {
 		prune = append(prune, caObjects(c)...)
 	}
+	// Git code delivery switched off (another code.mode) or away from GitHub App authentication.
+	if m := cluster.Spec.Code.Mode; (m != "" && m != "git") || cluster.Spec.Code.Git == nil {
+		prune = append(prune, prunedObject{c + "-g10k", &corev1.ConfigMap{}}, prunedObject{c + "-g10k-git-token", &corev1.Secret{}})
+	} else if a := cluster.Spec.Code.Git.AuthType; a != "" && a != "githubApp" {
+		prune = append(prune, prunedObject{c + "-g10k-git-token", &corev1.Secret{}})
+	}
 	if cluster.Spec.HieraSecrets.Enabled != nil && !*cluster.Spec.HieraSecrets.Enabled {
 		prune = append(prune, prunedObject{c + "-hiera-secrets", &corev1.Secret{}})
 	}

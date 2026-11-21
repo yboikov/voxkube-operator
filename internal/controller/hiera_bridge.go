@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -54,9 +55,11 @@ func RenderHieraSecretsBundle(
 		mergeSecretKeys(commonData, sec, prefix)
 	}
 
-	// 2. Collect labeled Secrets in the namespace (ESO ExternalSecrets, etc.)
+	// 2. Collect labeled Secrets in the namespace (ESO ExternalSecrets, etc.). The label selector is applied by the
+	// API server: Secrets aren't cached, so listing every Secret in the namespace would fetch all of them.
 	secretList := &corev1.SecretList{}
-	if err := k8sClient.List(ctx, secretList, client.InNamespace(cluster.Namespace)); err != nil {
+	if err := k8sClient.List(ctx, secretList, client.InNamespace(cluster.Namespace),
+		client.MatchingLabels(hieraLabelSelector(cluster.Spec.HieraSecrets.LabelSelector))); err != nil {
 		return nil, err
 	}
 
@@ -192,7 +195,31 @@ func CertManagerSecretName(node *openvoxv1alpha1.VoxNode, req openvoxv1alpha1.Ce
 	if req.SecretName != "" {
 		return req.SecretName
 	}
-	return fmt.Sprintf("voxnode-cert-%s-%s", sanitizeDNSLabel(node.Name), sanitizeDNSLabel(req.Name))
+	return certManagerDefaultName(node.Name, req.Name)
+}
+
+// certManagerDefaultName is voxnode-cert-<node>-<certificate> as a valid name of at most 63 characters (cert-manager
+// copies it into a label). Dots in the VoxNode name become "-" and the name gets a hash of the original
+// "<node>/<certificate>", so FQDN-named VoxNodes sharing a short hostname never collide. Names without dots keep
+// the plain form used before 0.2.8.
+func certManagerDefaultName(nodeName, certName string) string {
+	name := fmt.Sprintf("voxnode-cert-%s-%s", dnsLabel(nodeName, 253), dnsLabel(certName, 253))
+	h := shortHash(nodeName + "/" + certName)
+	if !strings.Contains(nodeName, ".") && len(name) <= 63 {
+		return name
+	}
+	if len(name) > 63-len(h)-1 {
+		name = strings.TrimRight(name[:63-len(h)-1], "-")
+	}
+	return name + "-" + h
+}
+
+// hieraLabelSelector is the label selector of Hiera Secrets: the custom one, or voxkube.io/hiera-secret=true.
+func hieraLabelSelector(customSelector map[string]string) map[string]string {
+	if len(customSelector) > 0 {
+		return customSelector
+	}
+	return map[string]string{LabelHieraSecret: "true"}
 }
 
 func matchesHieraLabelSelector(sec *corev1.Secret, customSelector map[string]string) bool {

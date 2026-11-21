@@ -327,7 +327,7 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 			continue
 		}
 
-		hostname := sanitizeDNSLabel(n.Certname)
+		hostname := dnsLabel(n.Certname, 63)
 		nodeName := n.Certname
 		ep := discoveryv1.Endpoint{
 			Addresses:  []string{ip.String()},
@@ -828,18 +828,19 @@ func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(
 	return secName, nil
 }
 
-func sanitizeDNSLabel(certname string) string {
-	lower := strings.ToLower(certname)
-	parts := strings.Split(lower, ".")
-	first := nonDNSChars.ReplaceAllString(parts[0], "-")
-	first = strings.Trim(first, "-")
-	if len(first) > 63 {
-		first = first[:63]
+// dnsLabel turns name (e.g. an FQDN certname) into a DNS label of at most max characters: lowercase, every character
+// outside [a-z0-9-] (dots included) becomes "-". The whole name is kept, so web01.us.example.com and
+// web01.eu.example.com stay distinct; a name that must be shortened ends in a hash of the original.
+func dnsLabel(name string, max int) string {
+	out := strings.Trim(nonDNSChars.ReplaceAllString(strings.ToLower(name), "-"), "-")
+	if out == "" {
+		out = "puppet-node"
 	}
-	if first == "" {
-		return "puppet-node"
+	if len(out) <= max {
+		return out
 	}
-	return first
+	h := shortHash(name)
+	return strings.TrimRight(out[:max-len(h)-1], "-") + "-" + h
 }
 
 func voxDiscoveryLabels(name string) map[string]string {
@@ -916,7 +917,7 @@ func (r *VoxDiscoveryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&openvoxv1alpha1.VoxDiscovery{}, builder.WithPredicates(specOrMetaChanged())).
 		Owns(&corev1.Service{}).
 		Owns(&discoveryv1.EndpointSlice{}).
-		Owns(&corev1.Secret{}).
+		Owns(&corev1.Secret{}, builder.OnlyMetadata).
 		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForCluster),
 			builder.WithPredicates(voxClusterChangedForDependents())).
 		Watches(&openvoxv1alpha1.VoxNode{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForVoxNode),

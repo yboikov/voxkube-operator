@@ -645,7 +645,7 @@ func (r *VoxNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&openvoxv1alpha1.VoxNode{}, builder.WithPredicates(specOrMetaChanged())).
 		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.nodesForCluster),
 			builder.WithPredicates(voxClusterChangedForDependents())).
-		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.nodesForSecret)).
+		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.nodesForSecret), builder.OnlyMetadata).
 		Complete(r)
 }
 

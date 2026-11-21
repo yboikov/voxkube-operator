@@ -123,6 +123,10 @@ func renderENCScript(cluster *openvoxv1alpha1.VoxCluster) string {
 	b.WriteString(`#!/bin/sh
 # Rendered by voxkube-operator. Puppet calls this script with the certname as $1.
 CERTNAME="$1"
+# Puppet validates certnames, but never build a path or URL from an unexpected one.
+case "$CERTNAME" in
+  ""|*/*|*..*|*" "*) echo "enc.sh: refusing certname '$CERTNAME'" >&2; exit 1 ;;
+esac
 F="/etc/puppetlabs/puppet/enc-nodes/${CERTNAME}.yaml"
 if [ -f "$F" ]; then
   cat "$F"

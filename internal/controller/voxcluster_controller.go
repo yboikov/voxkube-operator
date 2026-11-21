@@ -539,9 +539,11 @@ func (r *VoxClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&autoscalingv2.HorizontalPodAutoscaler{}).
+		// Metadata only: Secrets are never cached in full (cmd/main.go disables the Secret cache).
 		Watches(
 			&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.findClustersInNamespace),
+			handler.EnqueueRequestsFromMapFunc(r.clustersForSecret),
+			builder.OnlyMetadata,
 		).
 		Watches(
 			&openvoxv1alpha1.VoxNode{},
@@ -558,18 +560,4 @@ func (r *VoxClusterReconciler) clusterForVoxNode(_ context.Context, obj client.O
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: n.Namespace, Name: n.Spec.ClusterRef}}}
-}
-
-func (r *VoxClusterReconciler) findClustersInNamespace(ctx context.Context, obj client.Object) []reconcile.Request {
-	clusters := &openvoxv1alpha1.VoxClusterList{}
-	if err := r.List(ctx, clusters, client.InNamespace(obj.GetNamespace())); err != nil {
-		return nil
-	}
-	var reqs []reconcile.Request
-	for _, c := range clusters.Items {
-		reqs = append(reqs, reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: c.Namespace, Name: c.Name},
-		})
-	}
-	return reqs
 }
