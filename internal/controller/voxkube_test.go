@@ -700,8 +700,11 @@ func TestVoxDiscoveryReconciler_EndpointSlicesAndOpenVoxCAMTLS(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(writes) != 0 {
-		t.Errorf("a no-op VoxDiscovery reconcile must not write objects, got %v", writes)
+	for _, w := range writes {
+		if w != "update/status *v1alpha1.VoxDiscovery puppet-node-exporter" { // lastSyncTime, once per sync
+			t.Errorf("a no-op VoxDiscovery reconcile must not write objects, got %v", writes)
+			break
+		}
 	}
 }
 
