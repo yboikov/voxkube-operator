@@ -45,7 +45,7 @@ type ClusterCodeSpec struct {
 }
 
 // GitCodeSpec configures outbound-only Git synchronization via g10k.
-// +kubebuilder:validation:XValidation:rule="(self.authType != 'sshKey' && self.authType != 'httpsToken') || (has(self.credentialsSecretRef) && self.credentialsSecretRef != '')",message="authType sshKey and httpsToken require credentialsSecretRef"
+// +kubebuilder:validation:XValidation:rule="(self.authType != 'sshKey' && self.authType != 'httpsToken') || (has(self.credentialsSecretRef) && size(self.credentialsSecretRef) > 0)",message="authType sshKey and httpsToken require credentialsSecretRef"
 type GitCodeSpec struct {
 	// Remote is the Git repository URL for the Puppet control-repo. Every branch becomes a Puppet environment.
 	Remote string `json:"remote"`
@@ -102,7 +102,7 @@ type GitHubAppAuthSpec struct {
 }
 
 // ClusterCASpec configures the OpenVox Certificate Authority.
-// +kubebuilder:validation:XValidation:rule="self.autosignMode != 'psk' || (has(self.pskSecretRef) && self.pskSecretRef != '')",message="autosignMode psk requires pskSecretRef"
+// +kubebuilder:validation:XValidation:rule="self.autosignMode != 'psk' || (has(self.pskSecretRef) && size(self.pskSecretRef) > 0)",message="autosignMode psk requires pskSecretRef"
 type ClusterCASpec struct {
 	// Enabled controls whether the built-in OpenVox CA is managed.
 	// +kubebuilder:default=true
@@ -251,7 +251,7 @@ type ClusterDatabaseSpec struct {
 // ClusterPostgresSpec configures PostgreSQL for OpenVox DB.
 // Use mode "external" (CloudNativePG, RDS, Crunchy, ...) for production. Mode "builtin" runs a single
 // PostgreSQL pod on ephemeral storage and is meant for development and demos only.
-// +kubebuilder:validation:XValidation:rule="self.mode != 'external' || (has(self.host) && self.host != '' && has(self.credentialsSecretRef) && self.credentialsSecretRef != '')",message="postgres mode external requires host and credentialsSecretRef"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'external' || (has(self.host) && size(self.host) > 0 && has(self.credentialsSecretRef) && size(self.credentialsSecretRef) > 0)",message="postgres mode external requires host and credentialsSecretRef"
 type ClusterPostgresSpec struct {
 	// Mode selects "external" (CNPG/RDS/Crunchy) or "builtin" (ephemeral single-pod StatefulSet, dev/demo only).
 	// +kubebuilder:validation:Enum=external;builtin
@@ -389,7 +389,7 @@ type ClusterWorkflowsSpec struct {
 }
 
 // WorkflowNodeClassificationSpec configures ENC behavior.
-// +kubebuilder:validation:XValidation:rule="self.mode != 'externalHttp' || (has(self.externalURL) && self.externalURL != '')",message="mode externalHttp requires externalURL"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'externalHttp' || (has(self.externalURL) && size(self.externalURL) > 0)",message="mode externalHttp requires externalURL"
 type WorkflowNodeClassificationSpec struct {
 	// Mode selects the ENC: "voxnode" classifies from VoxNode resources; "externalHttp" uses the VoxNode
 	// classification when one exists and otherwise GETs "<externalURL>/<certname>" (which must return ENC YAML);

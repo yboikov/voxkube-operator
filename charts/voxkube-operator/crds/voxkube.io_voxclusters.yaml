@@ -101,8 +101,8 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: autosignMode psk requires pskSecretRef
-                  rule: self.autosignMode != 'psk' || (has(self.pskSecretRef) && self.pskSecretRef
-                    != '')
+                  rule: self.autosignMode != 'psk' || (has(self.pskSecretRef) && size(self.pskSecretRef)
+                    > 0)
               code:
                 description: Code configures how Puppet environments and modules are
                   deployed (Git/g10k, PVC, or ImageVolume).
@@ -212,8 +212,8 @@ spec:
                     x-kubernetes-validations:
                     - message: authType sshKey and httpsToken require credentialsSecretRef
                       rule: (self.authType != 'sshKey' && self.authType != 'httpsToken')
-                        || (has(self.credentialsSecretRef) && self.credentialsSecretRef
-                        != '')
+                        || (has(self.credentialsSecretRef) && size(self.credentialsSecretRef)
+                        > 0)
                   image:
                     description: |-
                       Image is an OCI image mounted read-only at /etc/puppetlabs/code when mode is "imageVolume"
@@ -324,9 +324,9 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: postgres mode external requires host and credentialsSecretRef
-                      rule: self.mode != 'external' || (has(self.host) && self.host
-                        != '' && has(self.credentialsSecretRef) && self.credentialsSecretRef
-                        != '')
+                      rule: self.mode != 'external' || (has(self.host) && size(self.host)
+                        > 0 && has(self.credentialsSecretRef) && size(self.credentialsSecretRef)
+                        > 0)
                   replicas:
                     default: 1
                     description: Replicas is the number of OpenVox DB pods.
@@ -664,7 +664,7 @@ spec:
                     x-kubernetes-validations:
                     - message: mode externalHttp requires externalURL
                       rule: self.mode != 'externalHttp' || (has(self.externalURL)
-                        && self.externalURL != '')
+                        && size(self.externalURL) > 0)
                   reports:
                     description: Reports configures Puppet run report processors and
                       optional external webhooks.

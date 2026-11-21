@@ -42,7 +42,7 @@ type DiscoveryPort struct {
 }
 
 // DiscoveryTLSSpec configures mTLS for Prometheus ServiceMonitor scraping of external VM exporters.
-// +kubebuilder:validation:XValidation:rule="self.mode != 'secretRef' || (has(self.secretName) && self.secretName != '')",message="tls mode secretRef requires secretName"
+// +kubebuilder:validation:XValidation:rule="self.mode != 'secretRef' || (has(self.secretName) && size(self.secretName) > 0)",message="tls mode secretRef requires secretName"
 type DiscoveryTLSSpec struct {
 	// Enabled turns on TLS/mTLS on the generated ServiceMonitor.
 	// +kubebuilder:default=false
