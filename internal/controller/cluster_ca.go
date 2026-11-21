@@ -55,6 +55,8 @@ func autoCreateVoxNodesEnabled(cluster *openvoxv1alpha1.VoxCluster) bool {
 // pskAutosignScript is Puppet's policy-based autosign executable for autosignMode "psk".
 // Puppet passes the certname as $1 and the CSR PEM on stdin; exit 0 signs the CSR.
 const pskAutosignScript = `#!/bin/sh
+# In-cluster service names are reserved: OpenVox DB trusts the service certname.
+case "$1" in *.svc|*.svc.cluster.local) exit 1 ;; esac
 PSK_FILE=` + pskMountPath + `/psk
 [ -s "$PSK_FILE" ] || exit 1
 expected=$(cat "$PSK_FILE")

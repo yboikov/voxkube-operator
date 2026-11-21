@@ -423,7 +423,8 @@ spec:
 ### Conventions
 
 - **Same-namespace references.** `clusterRef`, every Secret name, and every `SecretKeySelector` are resolved in the namespace of the referencing object. Cross-namespace references are not supported.
-- **Durations.** `code.git.pollInterval` and `VoxDiscovery.spec.syncInterval` use Go durations (`30s`, `5m`, `1h`). An invalid value falls back to the default. `ca.ttl` also accepts `d` (days) and `y` (365 days). PuppetDB housekeeping TTLs (`7d`, `14d`) use PuppetDB's format and are written verbatim to `database.ini`. cert-manager `duration` / `renewBefore` use cert-manager's format (`2160h`).
+- **Durations.** `code.git.pollInterval` and `VoxDiscovery.spec.syncInterval` use Go durations (`30s`, `5m`, `1h`); the API server rejects anything else.
+- **Validation.** The CRDs reject incomplete combinations at admission: `autosignMode: psk` without `pskSecretRef`, `postgres.mode: external` without `host` and `credentialsSecretRef`, `authType: sshKey`/`httpsToken` without `credentialsSecretRef`, `nodeClassification.mode: externalHttp` without `externalURL`, and VoxDiscovery `tls.mode: secretRef` without `secretName`. Requires Kubernetes 1.25+ (CEL). `ca.ttl` also accepts `d` (days) and `y` (365 days). PuppetDB housekeeping TTLs (`7d`, `14d`) use PuppetDB's format and are written verbatim to `database.ini`. cert-manager `duration` / `renewBefore` use cert-manager's format (`2160h`).
 - **Reconcile cadence.** A `VoxCluster` is reconciled on every change to its spec, to owned objects, to any Secret or `VoxNode` in its namespace, and at least every 60 s (every 15 s while not `Running`, or every `pollInterval` if that is shorter). Setting a new value on the annotation `voxkube.io/sync-now` forces an immediate reconcile, including a Git poll.
 - **Rollouts.** Configuration files mounted via `subPath` can't update in place, so every pod template carries `voxkube.io/config-hash` (and `voxkube.io/tls-hash` with a hash of the pod's own certificate). A changed file or a renewed certificate therefore rolls the affected pods.
 
@@ -470,7 +471,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `authType` | string | `githubApp` | `githubApp` \| `sshKey` \| `httpsToken` \| `none` | `githubApp` without a `githubApp` block is treated as `none`. |
 | `githubApp` | [`GitHubAppAuthSpec`](#voxclusterspeccodegitgithubapp) | – | – | For `authType: githubApp`. |
 | `credentialsSecretRef` | string | – | – | `sshKey`: Secret with `ssh-privatekey` and optionally `known_hosts` (without it, host keys are accepted on first use). `httpsToken`: Secret with `token` (plus optional `username`, default `x-access-token`) or with `username` + `password`. |
-| `pollInterval` | duration | `60s` | Go duration, minimum `10s` (shorter values are raised to it) | How often the operator (synchronized mode) or each sidecar (sidecar mode) checks the remote for moved branches. |
+| `pollInterval` | duration | `60s` | Go duration (rejected by the API server if invalid), minimum `10s` (shorter values are raised to it) | How often the operator (synchronized mode) or each sidecar (sidecar mode) checks the remote for moved branches. |
 | `synchronizedRollout` | bool | `true` | – | `true`: the operator polls `info/refs` (HTTP(S) remotes only) and rolls all compilers whenever **any branch** moves, so every pod serves the same revision. `false`, or any SSH remote: every compiler runs a `g10k-sync` sidecar that checks the branches (`git ls-remote --heads`) every `pollInterval` and redeploys only when one moved, plus once an hour to pick up Puppetfile modules that track a branch. Each pod does this independently. |
 | `generateTypes` | bool | `true` | – | Runs `puppet generate types` for every environment after each g10k deployment. |
 
@@ -495,8 +496,8 @@ The operator mints an installation token (`POST {apiBaseURL}/app/installations/{
 | `storageSize` | quantity | `2Gi` | – | Size of PVC `<cluster>-ca-data` (applied at creation). |
 | `storageClassName` | string | – | – | StorageClass for the CA PVC (applied at creation). |
 | `ttl` | string | `10y` | – | Validity of the CA certificate, applied when the CA is first generated. |
-| `autosignMode` | string | `voxnode` | `voxnode` \| `psk` \| `off` \| `true` | `voxnode`: a CSR is signed when its `VoxNode` is `Active`. `off`: nothing is signed automatically (`VoxNode` only reports the state; sign with `puppetserver ca sign`). `true`: the CA signs every CSR. `psk`: the CA signs CSRs whose `challengePassword` attribute (`csr_attributes.yaml` → `custom_attributes`) matches the pre-shared key. |
-| `pskSecretRef` | string | – | required for `psk` | Secret with key `psk`. `autosignMode: psk` without it puts the cluster in phase `Error`. |
+| `autosignMode` | string | `voxnode` | `voxnode` \| `psk` \| `off` \| `true` | `voxnode`: a CSR is signed when its `VoxNode` is `Active`. `off`: nothing is signed automatically (`VoxNode` only reports the state; sign with `puppetserver ca sign`). `true`: the CA signs every CSR (only for isolated networks: anyone who can reach the CA gets a certificate). `psk`: the CA signs CSRs whose `challengePassword` attribute (`csr_attributes.yaml` → `custom_attributes`) matches the pre-shared key. |
+| `pskSecretRef` | string | – | required for `psk` (the API server rejects `psk` without it) | Secret with key `psk`. In-cluster service names (`*.svc`) are never autosigned. |
 
 #### `VoxCluster.spec.server`
 
@@ -722,8 +723,8 @@ Labels `monitoring.voxkube.io/<label>` on a `VoxNode` become label `<label>` on 
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `clusterRef` | string | – | **required** | `VoxCluster` in the same namespace. |
-| `certname` | string | – | **required** | Agent certname (FQDN), unique per cluster. |
+| `clusterRef` | string | – | **required**, immutable | `VoxCluster` in the same namespace. |
+| `certname` | string | – | **required**, immutable, `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`, max 253 | Agent certname (FQDN). If two `VoxNode`s of a cluster share a certname, the oldest owns it; the others get `DuplicateCertname` and are ignored (never signed, revoked, cleaned or classified; deleting one never touches the certificate). In-cluster service names (`<cluster>.<ns>.svc`, anything ending in `.svc` or `.svc.cluster.local`) are reserved: `ReservedCertname`, never signed. |
 | `state` | string | `Active` | `PendingApproval` \| `Active` \| `Revoked` \| `Decommissioned` | See the [state machine](#voxnode-state-machine). |
 | `classification` | [`NodeClassificationSpec`](#voxnodespecclassification) | – | – | ENC data. |
 | `certificates` | [][`CertManagerCertRequest`](#voxnodespeccertificates) | – | – | cert-manager certificates injected into Hiera. |
@@ -801,6 +802,8 @@ Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap
 | `Decommissioned` | `PUT /puppet-ca/v1/clean`, then PuppetDB `deactivate node`, then deletes the node's `Certificate`s and removes its ENC and Hiera entries. Clears `lastSeenTime`, `lastReportStatus`, `certificateFingerprint` and `certificateExtensions`. A failed CA or DB step is retried; steps that succeeded aren't repeated. Without the operator's own CA (`ca.enabled: false`) or OpenVox DB, that step counts as done. | `Decommissioned` | `True` (`NodeDecommissioned`), or `False` (`CleanupPending`) while a step is failing | 30 s while a step is failing |
 | *object deleted* | Finalizer `voxkube.io/node-cleanup` runs the CA and DB steps and is released only when both succeeded (`Ready=False`, `CleanupPending` meanwhile). Released without cleanup when the `VoxCluster` is gone or being deleted, or when the `VoxNode` has the annotation `voxkube.io/skip-cleanup: "true"` (for a CA that is lost for good). The node leaves the ENC and Hiera as soon as deletion starts. | – | `False` (`CleanupPending`) while blocked | 30 s |
 | *cluster missing* | – | `Error` | `False` (`ClusterNotFound`) | on cluster change |
+| *duplicate certname* (an older `VoxNode` has it) | – (deletion releases the finalizer without cleanup) | `Error` | `False` (`DuplicateCertname`) | 1 min (takes over when the owner is gone) |
+| *reserved certname* | – | `Error` | `False` (`ReservedCertname`) | on change |
 
 `VoxNode`s are also re-queued whenever their `VoxCluster` changes (for example when the CA becomes ready).
 
@@ -832,7 +835,7 @@ Printer columns: `.spec.clusterRef`, `.status.discoveredNodes`, `.status.endpoin
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `clusterRef` | string | – | **required** | `VoxCluster` whose OpenVox DB is queried. |
-| `syncInterval` | duration | `60s` | Go duration | How often OpenVox DB is queried. Changes to the VoxDiscovery spec, its VoxCluster or VoxNodes (state, `monitoring.voxkube.io/*` labels) trigger an extra sync. |
+| `syncInterval` | duration | `60s` | Go duration (rejected if invalid) | How often OpenVox DB is queried. Changes to the VoxDiscovery spec, its VoxCluster or VoxNodes (state, `monitoring.voxkube.io/*` labels) trigger an extra sync. |
 | `selector` | [`DiscoverySelectorSpec`](#voxdiscoveryspecselector) | – | – | Node filter. All criteria must match (AND). |
 | `addressFact` | string | `networking.ip` | – | Dotted fact path for the endpoint address (for example `networking.ip6` for IPv6). Nodes without a valid IP are skipped. |
 | `ports` | [][`DiscoveryPort`](#voxdiscoveryspecports) | – | **required** | Ports on the Service, the slices and the ServiceMonitor endpoints. |

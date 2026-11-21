@@ -189,11 +189,16 @@ spec:
                           "secretRef".
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: tls mode secretRef requires secretName
+                      rule: self.mode != 'secretRef' || (has(self.secretName) && size(self.secretName)
+                        > 0)
                 type: object
               syncInterval:
                 default: 60s
                 description: SyncInterval controls how frequently the operator queries
                   PuppetDB and updates EndpointSlices.
+                pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
                 type: string
             required:
             - clusterRef

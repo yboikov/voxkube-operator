@@ -99,6 +99,10 @@ spec:
                       Accepts Go durations plus "d" (days) and "y" (365 days) suffixes, e.g. "10y", "3650d", "87600h".
                     type: string
                 type: object
+                x-kubernetes-validations:
+                - message: autosignMode psk requires pskSecretRef
+                  rule: self.autosignMode != 'psk' || (has(self.pskSecretRef) && size(self.pskSecretRef)
+                    > 0)
               code:
                 description: Code configures how Puppet environments and modules are
                   deployed (Git/g10k, PVC, or ImageVolume).
@@ -188,6 +192,7 @@ spec:
                         default: 60s
                         description: PollInterval is how often the remote is checked
                           for new commits (Go duration, e.g. "60s", "5m").
+                        pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
                         type: string
                       remote:
                         description: Remote is the Git repository URL for the Puppet
@@ -204,6 +209,11 @@ spec:
                     required:
                     - remote
                     type: object
+                    x-kubernetes-validations:
+                    - message: authType sshKey and httpsToken require credentialsSecretRef
+                      rule: (self.authType != 'sshKey' && self.authType != 'httpsToken')
+                        || (has(self.credentialsSecretRef) && size(self.credentialsSecretRef)
+                        > 0)
                   image:
                     description: |-
                       Image is an OCI image mounted read-only at /etc/puppetlabs/code when mode is "imageVolume"
@@ -312,6 +322,11 @@ spec:
                         - verify-full
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: postgres mode external requires host and credentialsSecretRef
+                      rule: self.mode != 'external' || (has(self.host) && size(self.host)
+                        > 0 && has(self.credentialsSecretRef) && size(self.credentialsSecretRef)
+                        > 0)
                   replicas:
                     default: 1
                     description: Replicas is the number of OpenVox DB pods.
@@ -646,6 +661,10 @@ spec:
                         - none
                         type: string
                     type: object
+                    x-kubernetes-validations:
+                    - message: mode externalHttp requires externalURL
+                      rule: self.mode != 'externalHttp' || (has(self.externalURL)
+                        && size(self.externalURL) > 0)
                   reports:
                     description: Reports configures Puppet run report processors and
                       optional external webhooks.
