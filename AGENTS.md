@@ -65,6 +65,11 @@ update that section in the same change. Never document a field as working unless
   - The VoxCluster controller is the only writer of `<cluster>-enc-nodes` and `<cluster>-hiera-secrets`. It renders
     them first in `reconcileStack`, so VoxNode changes apply even while later steps fail. VoxNodes don't write them.
   - CA and OpenVox DB mTLS clients come from `mtlsClients` (one per VoxCluster, rebuilt on credential change).
+  - A (cluster, certname) is owned by its oldest VoxNode (`certnameOwner`, `servedVoxNodes`). Duplicates never
+    sign, revoke, clean or classify, and are deleted without cleanup. `*.svc` certnames are reserved
+    (`reservedCertname`): OpenVox DB's allowlist trusts the service certname.
+  - Required-field combinations are CEL rules on the CRD types (`+kubebuilder:validation:XValidation`). Keep
+    controllers tolerant anyway (older objects predate the rules).
   - The external ENC (`enc.sh`, `externalHttp`) falls back to the default only on HTTP 404. Any other failure
     exits non-zero so the catalog request fails, rather than compiling the wrong classification.
 

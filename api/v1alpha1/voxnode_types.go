@@ -119,9 +119,15 @@ type NodeSecretRef struct {
 // VoxNodeSpec defines the desired state of a VoxNode.
 type VoxNodeSpec struct {
 	// ClusterRef is the name of the VoxCluster managing this node.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="clusterRef is immutable"
 	ClusterRef string `json:"clusterRef"`
 
 	// Certname is the Puppet agent certificate name (FQDN) of the VM/client.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="certname is immutable; create a new VoxNode for a new certname"
 	Certname string `json:"certname"`
 
 	// State controls CSR signing, revocation, and atomic CA + PuppetDB decommissioning.

@@ -23,6 +23,17 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ### Added
 - `VoxCluster.spec.database.certificateAllowlist` (#27).
+- CRD validation (CEL, Kubernetes 1.25+): incomplete `psk`, `external` PostgreSQL, `sshKey`/`httpsToken`,
+  `externalHttp` and VoxDiscovery `secretRef` settings are rejected at admission; `pollInterval`/`syncInterval` must
+  be Go durations; VoxNode `certname` must be a valid lowercase certname; `certname` and `clusterRef` are
+  immutable (#34).
+
+### Fixed (duplicates)
+- Two VoxNodes with the same certname silently overwrote each other's ENC and Hiera data, and deleting either one
+  revoked the certificate of the machine both described. The oldest now owns the certname; others report
+  `DuplicateCertname`, are ignored, and are deleted without touching the certificate (#34).
+- An agent could be signed for the cluster's own service certname, which OpenVox DB's allowlist trusts. Service
+  names (`*.svc`) are now reserved and never signed via VoxNode or PSK autosigning (#34).
 
 ### Fixed
 - VoxDiscovery reconciled in a loop (about once a second, querying OpenVox DB each time) because writing its own

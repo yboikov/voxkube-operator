@@ -93,10 +93,7 @@ func RenderHieraSecretsBundle(
 	}
 
 	// 3. Collect per-VoxNode explicit Secrets and multi-certificate cert-manager TLS Secrets
-	for _, node := range nodes {
-		if !nodeServedBy(&node, cluster) {
-			continue
-		}
+	for _, node := range servedVoxNodes(nodes, cluster) {
 		certname := node.Spec.Certname
 		if certname == "" {
 			continue
@@ -121,7 +118,7 @@ func RenderHieraSecretsBundle(
 		if len(node.Spec.Certificates) > 0 {
 			certsMap := make(map[string]interface{})
 			for _, certReq := range node.Spec.Certificates {
-				secName := CertManagerSecretName(&node, certReq)
+				secName := CertManagerSecretName(node, certReq)
 				sec := &corev1.Secret{}
 				if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: secName}, sec); err != nil {
 					if apierrors.IsNotFound(err) {

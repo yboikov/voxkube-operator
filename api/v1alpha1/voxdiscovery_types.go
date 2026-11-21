@@ -42,6 +42,7 @@ type DiscoveryPort struct {
 }
 
 // DiscoveryTLSSpec configures mTLS for Prometheus ServiceMonitor scraping of external VM exporters.
+// +kubebuilder:validation:XValidation:rule="self.mode != 'secretRef' || (has(self.secretName) && self.secretName != '')",message="tls mode secretRef requires secretName"
 type DiscoveryTLSSpec struct {
 	// Enabled turns on TLS/mTLS on the generated ServiceMonitor.
 	// +kubebuilder:default=false
@@ -99,6 +100,7 @@ type VoxDiscoverySpec struct {
 
 	// SyncInterval controls how frequently the operator queries PuppetDB and updates EndpointSlices.
 	// +kubebuilder:default="60s"
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$`
 	SyncInterval string `json:"syncInterval,omitempty"`
 
 	// Selector filters which active nodes in PuppetDB are exported.

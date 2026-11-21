@@ -326,11 +326,7 @@ func (r *VoxClusterReconciler) reconcileENCConfigMap(ctx context.Context, cluste
 	}
 
 	data := make(map[string]string)
-	for i := range nodeList.Items {
-		n := &nodeList.Items[i]
-		if !nodeServedBy(n, cluster) {
-			continue
-		}
+	for _, n := range servedVoxNodes(nodeList.Items, cluster) {
 		encYAML, err := RenderVoxNodeENCYAML(n, cluster)
 		if err != nil {
 			return err

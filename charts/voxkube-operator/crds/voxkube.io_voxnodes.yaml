@@ -139,7 +139,13 @@ spec:
               certname:
                 description: Certname is the Puppet agent certificate name (FQDN)
                   of the VM/client.
+                maxLength: 253
+                minLength: 1
+                pattern: ^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$
                 type: string
+                x-kubernetes-validations:
+                - message: certname is immutable; create a new VoxNode for a new certname
+                  rule: self == oldSelf
               classification:
                 description: Classification defines the Kubernetes-native ENC classification
                   for this node.
@@ -171,7 +177,11 @@ spec:
               clusterRef:
                 description: ClusterRef is the name of the VoxCluster managing this
                   node.
+                minLength: 1
                 type: string
+                x-kubernetes-validations:
+                - message: clusterRef is immutable
+                  rule: self == oldSelf
               secrets:
                 description: Secrets maps node-specific ESO / Kubernetes Secrets into
                   this VM's Hiera hierarchy.

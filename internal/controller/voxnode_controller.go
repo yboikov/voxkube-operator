@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -76,10 +77,20 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		clusterFound = false
 	}
 
+	// Two VoxNodes for the same (cluster, certname): the oldest owns the certname, the others are inert.
+	owner, err := r.certnameOwner(ctx, node)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	duplicateOf := ""
+	if owner != nil && owner.Name != node.Name {
+		duplicateOf = owner.Name
+	}
+
 	// Deletion: clean the CA and OpenVox DB, then release the finalizer. The finalizer stays until both
-	// succeed, unless the VoxCluster is gone (or going) or the skip-cleanup annotation is set.
+	// succeed, unless the VoxCluster is gone (or going), the node is a duplicate or skip-cleanup is set.
 	if !node.DeletionTimestamp.IsZero() {
-		return r.finalizeVoxNode(ctx, node, cluster, clusterFound)
+		return r.finalizeVoxNode(ctx, node, cluster, clusterFound, duplicateOf)
 	}
 
 	if !controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
@@ -103,6 +114,21 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !clusterFound {
 		status.Phase = openvoxv1alpha1.NodePhaseError
 		setReady(false, "ClusterNotFound", fmt.Sprintf("VoxCluster %q not found", node.Spec.ClusterRef))
+		return ctrl.Result{}, r.updateVoxNodeStatus(ctx, req.NamespacedName, *status)
+	}
+	if duplicateOf != "" {
+		// Never sign, revoke, clean or classify for a duplicate: that would act on the machine the owner manages.
+		status.Phase = openvoxv1alpha1.NodePhaseError
+		setReady(false, "DuplicateCertname", fmt.Sprintf("certname %q is already managed by VoxNode %q in VoxCluster %q; "+
+			"this VoxNode is ignored (delete it, or delete %q to hand the certname over)", node.Spec.Certname, duplicateOf,
+			node.Spec.ClusterRef, duplicateOf))
+		// Re-check periodically: the owner may be deleted, and then this VoxNode takes over.
+		return ctrl.Result{RequeueAfter: nodeRequeuePending}, r.updateVoxNodeStatus(ctx, req.NamespacedName, *status)
+	}
+	if reservedCertname(cluster, node.Spec.Certname) {
+		status.Phase = openvoxv1alpha1.NodePhaseError
+		setReady(false, "ReservedCertname", fmt.Sprintf("certname %q is reserved for the cluster's own services and is never signed",
+			node.Spec.Certname))
 		return ctrl.Result{}, r.updateVoxNodeStatus(ctx, req.NamespacedName, *status)
 	}
 
@@ -176,7 +202,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 // finalizeVoxNode runs the deletion cleanup and releases the finalizer once it has succeeded.
 func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1alpha1.VoxNode,
-	cluster *openvoxv1alpha1.VoxCluster, clusterFound bool) (ctrl.Result, error) {
+	cluster *openvoxv1alpha1.VoxCluster, clusterFound bool, duplicateOf string) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
 		return ctrl.Result{}, nil
 	}
@@ -187,6 +213,9 @@ func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1
 	switch {
 	case node.Annotations[AnnotationSkipCleanup] == "true":
 		logger.Info("skip-cleanup annotation set; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
+	case duplicateOf != "":
+		// The certificate belongs to the machine the owning VoxNode manages: cleaning it would revoke that machine.
+		logger.Info("duplicate VoxNode; releasing it without CA/OpenVox DB cleanup", "certname", node.Spec.Certname, "owner", duplicateOf)
 	case !clusterLive:
 		// Nothing left to clean against (or it is being torn down): don't block deletion forever.
 		logger.Info("VoxCluster gone; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
@@ -668,4 +697,63 @@ func statusJSONEqual(a, b interface{}) bool {
 	ja, errA := json.Marshal(a)
 	jb, errB := json.Marshal(b)
 	return errA == nil && errB == nil && bytes.Equal(ja, jb)
+}
+
+// certnameOwner returns the VoxNode that owns node's (clusterRef, certname): the oldest by creation time, then
+// name. Deleting VoxNodes still count, so a duplicate doesn't take over while the owner's cleanup runs.
+func (r *VoxNodeReconciler) certnameOwner(ctx context.Context, node *openvoxv1alpha1.VoxNode) (*openvoxv1alpha1.VoxNode, error) {
+	list := &openvoxv1alpha1.VoxNodeList{}
+	if err := r.List(ctx, list, client.InNamespace(node.Namespace)); err != nil {
+		return nil, err
+	}
+	var owner *openvoxv1alpha1.VoxNode
+	for i := range list.Items {
+		n := &list.Items[i]
+		if n.Spec.ClusterRef != node.Spec.ClusterRef || n.Spec.Certname != node.Spec.Certname {
+			continue
+		}
+		if owner == nil || olderVoxNode(n, owner) {
+			owner = n
+		}
+	}
+	return owner, nil
+}
+
+func olderVoxNode(a, b *openvoxv1alpha1.VoxNode) bool {
+	if !a.CreationTimestamp.Equal(&b.CreationTimestamp) {
+		return a.CreationTimestamp.Before(&b.CreationTimestamp)
+	}
+	return a.Name < b.Name
+}
+
+// servedVoxNodes returns the VoxNodes cluster classifies and renders Hiera data for, oldest first: one per certname
+// (the owner; duplicates are skipped), and only those nodeServedBy accepts.
+func servedVoxNodes(nodes []openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) []*openvoxv1alpha1.VoxNode {
+	sorted := make([]*openvoxv1alpha1.VoxNode, 0, len(nodes))
+	for i := range nodes {
+		if nodes[i].Spec.ClusterRef == cluster.Name {
+			sorted = append(sorted, &nodes[i])
+		}
+	}
+	sort.SliceStable(sorted, func(i, j int) bool { return olderVoxNode(sorted[i], sorted[j]) })
+	seen := map[string]bool{}
+	var out []*openvoxv1alpha1.VoxNode
+	for _, n := range sorted {
+		if seen[n.Spec.Certname] {
+			continue // a duplicate: the owner came first
+		}
+		seen[n.Spec.Certname] = true
+		if nodeServedBy(n, cluster) && !reservedCertname(cluster, n.Spec.Certname) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// reservedCertname reports certnames that belong to the cluster's own services: the compiler/operator and DB
+// certnames, and any in-cluster service name. OpenVox DB's allowlist trusts the service certname, so an agent must
+// never be able to get a certificate for it.
+func reservedCertname(cluster *openvoxv1alpha1.VoxCluster, certname string) bool {
+	return certname == serviceCertname(cluster) || certname == dbCertname(cluster) ||
+		strings.HasSuffix(certname, ".svc") || strings.HasSuffix(certname, ".svc.cluster.local")
 }
