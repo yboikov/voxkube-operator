@@ -189,16 +189,44 @@ SRV_PORT="${SRV_EXT_URL##*:}"
 CA_PORT="${CA_EXT_URL##*:}"
 echo "  Server NodePort=${SRV_PORT}, CA NodePort=${CA_PORT}, VPS_IP=${VPS_IP}"
 
-log "3. Verifying OpenVox DB plain-HTTP port 8080 is NOT exposed on Service or pod IP"
+log "3. Verifying OpenVox DB hardening (port 8080 localhost-only) & PKI split (no ca.key / pp_cli_auth in compiler or DB pods)"
 DB_SVC_PORTS=$(kubectl -n "${NAMESPACE}" get svc "${CLUSTER}-db" -o jsonpath='{.spec.ports[*].port}')
 assert_eq "DB Service exposes only port 8081" "${DB_SVC_PORTS}" "8081"
 
-DB_POD_IP=$(kubectl -n "${NAMESPACE}" get pod -l "app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=db" -o jsonpath='{.items[0].status.podIP}')
+DB_POD=$(kubectl -n "${NAMESPACE}" get pod -l "app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=db" -o jsonpath='{.items[0].metadata.name}')
+DB_POD_IP=$(kubectl -n "${NAMESPACE}" get pod "${DB_POD}" -o jsonpath='{.status.podIP}')
 if curl -fsS --max-time 3 "http://${DB_POD_IP}:8080/status/v1/simple" >/dev/null 2>&1; then
   fail "DB plain HTTP 8080 is reachable on pod IP ${DB_POD_IP} (expected localhost-only)"
 else
   pass "DB plain HTTP 8080 refused on pod IP ${DB_POD_IP} (localhost-only)"
 fi
+
+# Verify NO compiler pod contains ca.key or a pp_cli_auth certificate
+SRV_PODS=$(kubectl -n "${NAMESPACE}" get pod -l "app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=server" -o jsonpath='{.items[*].metadata.name}')
+for p in ${SRV_PODS}; do
+  SRV_SECRETS=$(kubectl -n "${NAMESPACE}" get pod "${p}" -o jsonpath='{.spec.volumes[*].secret.secretName}')
+  assert_contains "Compiler pod ${p} mounts ${CLUSTER}-server-tls" "${SRV_SECRETS}" "${CLUSTER}-server-tls"
+  assert_not_contains "Compiler pod ${p} does NOT mount ${CLUSTER}-ca-tls" "${SRV_SECRETS}" "${CLUSTER}-ca-tls"
+  if kubectl -n "${NAMESPACE}" exec "${p}" -c openvox-server -- sh -c 'test ! -e /etc/puppetlabs/puppet/ssl-certs/ca.key && test -z "$(find /etc/puppetlabs/puppet/ssl-certs /var/cache/puppetlabs/ssldir -name "*ca*key*" 2>/dev/null)"'; then
+    pass "Compiler pod ${p} contains no ca.key"
+  else
+    fail "Compiler pod ${p} unexpectedly contains ca.key!"
+  fi
+  SRV_CERT_TEXT=$(kubectl -n "${NAMESPACE}" exec "${p}" -c openvox-server -- openssl x509 -in /etc/puppetlabs/puppet/ssl-certs/tls.crt -noout -text)
+  assert_not_contains "Compiler pod ${p} cert has no pp_cli_auth OID" "${SRV_CERT_TEXT}" "1.3.6.1.4.1.34380.1.3.39"
+done
+
+# Verify OpenVox DB pod contains no ca.key, no pp_cli_auth cert, and mounts crl.pem + certificate-allowlist
+DB_SECRETS=$(kubectl -n "${NAMESPACE}" get pod "${DB_POD}" -o jsonpath='{.spec.volumes[*].secret.secretName}')
+assert_contains "DB pod ${DB_POD} mounts ${CLUSTER}-db-tls" "${DB_SECRETS}" "${CLUSTER}-db-tls"
+assert_not_contains "DB pod ${DB_POD} does NOT mount ${CLUSTER}-ca-tls" "${DB_SECRETS}" "${CLUSTER}-ca-tls"
+if kubectl -n "${NAMESPACE}" exec "${DB_POD}" -c openvox-db -- sh -c 'test ! -e /etc/puppetlabs/puppetdb/ssl/ca.key && test -s /etc/puppetlabs/puppetdb/ssl/crl.pem && test -s /etc/puppetlabs/puppetdb/certificate-allowlist'; then
+  pass "DB pod ${DB_POD} has no ca.key and mounts crl.pem + certificate-allowlist"
+else
+  fail "DB pod ${DB_POD} failed PKI/CRL/allowlist file check!"
+fi
+DB_CERT_TEXT=$(kubectl -n "${NAMESPACE}" exec "${DB_POD}" -c openvox-db -- openssl x509 -in /etc/puppetlabs/puppetdb/ssl/tls.crt -noout -text)
+assert_not_contains "DB pod ${DB_POD} cert has no pp_cli_auth OID" "${DB_CERT_TEXT}" "1.3.6.1.4.1.34380.1.3.39"
 
 log "4. Starting external Docker openvox-agent container (${AGENT_CONTAINER}) & testing CSR + pp_role + autoCreateVoxNode"
 docker run -d --name "${AGENT_CONTAINER}" \
@@ -312,6 +340,20 @@ else
   fail "VoxNode lastReportStatus unexpected: got '${LAST_REPORT}', want 'changed' or 'unchanged'"
 fi
 
+# Verify OpenVox DB certificate-allowlist rejects a signed Puppet agent certificate on mTLS 8081
+AGENT_TLS_TMP=$(mktemp -d)
+docker cp "${AGENT_CONTAINER}:/etc/puppetlabs/puppet/ssl/certs/ca.pem" "${AGENT_TLS_TMP}/ca.pem"
+docker cp "${AGENT_CONTAINER}:/etc/puppetlabs/puppet/ssl/certs/${AGENT_CERTNAME}.pem" "${AGENT_TLS_TMP}/cert.pem"
+docker cp "${AGENT_CONTAINER}:/etc/puppetlabs/puppet/ssl/private_keys/${AGENT_CERTNAME}.pem" "${AGENT_TLS_TMP}/key.pem"
+DB_AGENT_CODE=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
+  --resolve "${CLUSTER}-db:8081:${DB_POD_IP}" \
+  --cacert "${AGENT_TLS_TMP}/ca.pem" \
+  --cert "${AGENT_TLS_TMP}/cert.pem" \
+  --key "${AGENT_TLS_TMP}/key.pem" \
+  "https://${CLUSTER}-db:8081/pdb/query/v4/nodes" || true)
+rm -rf "${AGENT_TLS_TMP}"
+assert_eq "OpenVox DB certificate-allowlist rejects agent cert on mTLS 8081 (HTTP 403)" "${DB_AGENT_CODE}" "403"
+
 log "6. Testing Git/g10k code sync: httpsToken + synchronizedRollout + Hiera Sensitive + sync-now"
 kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p "{
   \"spec\": {
@@ -349,10 +391,17 @@ else
 fi
 GIT_TXT=$(docker exec "${AGENT_CONTAINER}" cat /etc/voxkube-git.txt 2>/dev/null || true)
 SECRET_TXT=$(docker exec "${AGENT_CONTAINER}" cat /etc/voxkube-secret.txt 2>/dev/null || true)
+EXPORTER_ENV=$(docker exec "${AGENT_CONTAINER}" cat /etc/node_exporter/exporter.env 2>/dev/null || true)
 assert_contains "Git site.pp applied GitRev=v1 & HasSecret=yes" "${GIT_TXT}" "GitRev=v1"
 assert_contains "Git site.pp found Hiera Sensitive secret" "${GIT_TXT}" "HasSecret=yes"
 assert_eq "Hiera Sensitive secret written to /etc/voxkube-secret.txt" "${SECRET_TXT}" "super-secret-e2e-value"
 assert_not_contains "Sensitive secret value NOT leaked in puppet agent output" "${AGENT_OUT}" "super-secret-e2e-value"
+assert_contains "Puppetfile stdlib file_line + env Hiera configured /etc/node_exporter/exporter.env" "${EXPORTER_ENV}" "NODE_EXPORTER_PORT=9100"
+if docker exec "${AGENT_CONTAINER}" pgrep -x node_exporter >/dev/null 2>&1; then
+  pass "Puppet role::webserver / profile::node_exporter started real node_exporter daemon"
+else
+  fail "node_exporter process is not running inside ${AGENT_CONTAINER}"
+fi
 
 # Push commit v2 and verify synchronized rollout updates observedCommit and rolls compilers
 kubectl -n "${INFRA_NS}" exec deploy/git-server -- sh -eu -c '
@@ -412,7 +461,7 @@ else
   fail "SSH g10k-init + g10k-sync rollout failed under random UID 1000720000"
 fi
 
-log "8. Testing VoxDiscovery (EndpointSlices, trusted.extensions.pp_role, monitoring.voxkube.io/*, targetLabels validation)"
+log "8. Testing VoxDiscovery (selector.classes=[profile::node_exporter], EndpointSlices, live node_exporter scrape, targetLabels validation)"
 kubectl -n "${NAMESPACE}" label vn "${AGENT_CERTNAME}" \
   monitoring.voxkube.io/alerts=false \
   monitoring.voxkube.io/team=platform \
@@ -429,6 +478,8 @@ spec:
   syncInterval: 15s
   selector:
     environment: production
+    classes:
+      - profile::node_exporter
   endpointLabels:
     role: trusted.extensions.pp_role
     os: os.family
@@ -442,8 +493,8 @@ spec:
       env: e2e
 EOF
 
-if wait_for "VoxDiscovery exported 1 node" 90 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.discoveredNodes}')\" = '1' ]"; then
-  pass "VoxDiscovery exported ${AGENT_CERTNAME} from OpenVox DB"
+if wait_for "VoxDiscovery exported 1 node matching class profile::node_exporter" 90 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.discoveredNodes}')\" = '1' ]"; then
+  pass "VoxDiscovery exported ${AGENT_CERTNAME} via selector.classes=[profile::node_exporter]"
 fi
 
 SLICE_JSON=$(kubectl -n "${NAMESPACE}" get endpointslice -l "kubernetes.io/service-name=e2e-node-exporter" -o json)
@@ -452,6 +503,13 @@ assert_contains "EndpointSlice label.voxkube.io/role=webserver from trusted.exte
 assert_contains "EndpointSlice label.voxkube.io/os=RedHat from os.family" "${SLICE_JSON}" '"label.voxkube.io/os": "RedHat"'
 assert_contains "EndpointSlice label.voxkube.io/alerts=false from VoxNode label" "${SLICE_JSON}" '"label.voxkube.io/alerts": "false"'
 assert_contains "EndpointSlice label.voxkube.io/team=platform from VoxNode label" "${SLICE_JSON}" '"label.voxkube.io/team": "platform"'
+
+# Live-scrape the actual IP:port published by VoxDiscovery's EndpointSlice
+EP_IP=$(printf '%s' "${SLICE_JSON}" | jq -r '.items[0].endpoints[0].addresses[0] // empty')
+EP_PORT=$(printf '%s' "${SLICE_JSON}" | jq -r '.items[0].ports[0].port // empty')
+SCRAPE_OUT=$(curl -fsS --max-time 5 "http://${EP_IP}:${EP_PORT}/metrics" 2>&1 || true)
+assert_contains "Live scrape of EndpointSlice ${EP_IP}:${EP_PORT}/metrics returned real node_exporter metrics" "${SCRAPE_OUT}" "node_uname_info{"
+assert_contains "Live scrape returned Puppet textfile metric voxkube_managed_node_info" "${SCRAPE_OUT}" "voxkube_managed_node_info{cluster=\"${CLUSTER}\",role=\"webserver\"} 1"
 
 # Verify invalid targetLabels key is rejected with InvalidLabels
 kubectl -n "${NAMESPACE}" apply -f - <<EOF
@@ -524,8 +582,8 @@ kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{
     "hieraSecrets": { "enabled": false }
   }
 }'
-if wait_for "DB + Postgres + Hiera Secret pruned" 90 "! kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-db && ! kubectl -n ${NAMESPACE} get sts ${CLUSTER}-postgres && ! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-hiera-secrets"; then
-  pass "pruneDisabledComponents deleted DB Deployment, Postgres StatefulSet, and Hiera Secret"
+if wait_for "DB + Postgres + DB TLS + Hiera Secret pruned" 90 "! kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-db && ! kubectl -n ${NAMESPACE} get sts ${CLUSTER}-postgres && ! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-db-tls && ! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-hiera-secrets"; then
+  pass "pruneDisabledComponents deleted DB Deployment, Postgres StatefulSet, DB TLS Secret, and Hiera Secret"
 fi
 if wait_for "VoxDiscovery stood down with DatabaseDisabled" 60 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].reason}')\" = 'DatabaseDisabled' ]"; then
   pass "VoxDiscovery stood down cleanly (DatabaseDisabled) and removed EndpointSlices"
