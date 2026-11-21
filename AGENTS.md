@@ -42,6 +42,22 @@ update that section in the same change. Never document a field as working unless
     `git ls-remote` fails, the remote has no branches, or g10k leaves `environments/` empty (then it also deletes
     the g10k cache, whose broken mirror would otherwise keep every later run empty). g10k itself exits 0 in
     those cases. A pod once ran for hours without code because of this (fixed in 0.2.6).
+  - The VoxNode finalizer is released only after the CA clean and OpenVox DB deactivation succeeded (each step is
+    recorded in `status.caCleaned` / `puppetDBDeactivated` and not repeated). The only ways around it are a
+    missing or deleting VoxCluster and the annotation `voxkube.io/skip-cleanup: "true"`. Don't go back to
+    "log and proceed": it leaves certificates valid on the CA for machines that are gone.
+  - Unstructured objects the operator owns (Routes, cert-manager Certificates, ServiceMonitors) are updated only
+    when the hash of what it renders (`voxkube.io/applied-hash`) changes, through `prepareUnstructuredUpdate`,
+    which also keeps a router-generated Route `spec.host` and foreign annotations. Use it for new unstructured
+    kinds instead of a blind Update.
+  - Switching a component off deletes its objects (`pruneDisabledComponents`), but only objects controlled by
+    the VoxCluster, and never the CA PVC or CA Secret.
+  - The OpenVox DB plain-HTTP listener is bound to 127.0.0.1 and only serves the exec readiness probe. Never
+    expose it on the Service: it is unauthenticated.
+  - The `voxkube_node_*` metric label set is fixed per process (`--node-metric-labels`). Don't derive label names
+    from whatever labels the VoxNodes carry: that changes the identity of every series when one node is labelled.
+  - The external ENC (`enc.sh`, `externalHttp`) falls back to the default only on HTTP 404. Any other failure
+    exits non-zero so the catalog request fails, rather than compiling the wrong classification.
 
 ## Code map
 
