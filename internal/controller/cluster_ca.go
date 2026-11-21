@@ -437,6 +437,22 @@ func puppetStatusProbe(port int32, scheme corev1.URIScheme) *corev1.Probe {
 	}
 }
 
+// localStatusProbe checks /status/v1/simple on a plain-HTTP port bound to 127.0.0.1 inside the container, which an
+// httpGet probe (sent by the kubelet to the pod IP) can't reach.
+func localStatusProbe(port int32) *corev1.Probe {
+	return &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{
+				"curl", "-fsS", "-o", "/dev/null", "--max-time", "4", fmt.Sprintf("http://127.0.0.1:%d/status/v1/simple", port),
+			}},
+		},
+		InitialDelaySeconds: 20,
+		PeriodSeconds:       10,
+		TimeoutSeconds:      5,
+		FailureThreshold:    6,
+	}
+}
+
 func serverImage(cluster *openvoxv1alpha1.VoxCluster) string {
 	if cluster.Spec.Server.Image != "" {
 		return cluster.Spec.Server.Image

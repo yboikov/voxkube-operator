@@ -148,8 +148,10 @@ gc-interval = %d
 		firstNonEmpty(hk.NodeTTL, "7d"), firstNonEmpty(hk.NodePurgeTTL, "14d"), firstNonEmpty(hk.ReportTTL, "14d"),
 		gcInterval)
 
+	// Plain HTTP has no access control in OpenVox DB (any client could read all facts and submit commands), so it
+	// only listens on localhost, for the readiness probe. Everything else uses mTLS on 8081.
 	jettyIni := `[jetty]
-host = 0.0.0.0
+host = 127.0.0.1
 port = 8080
 ssl-host = 0.0.0.0
 ssl-port = 8081
@@ -214,10 +216,9 @@ access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
 						Image:           dbImg,
 						SecurityContext: buildRestrictedContainerSecurityContext(),
 						Ports: []corev1.ContainerPort{
-							{Name: "http", ContainerPort: 8080, Protocol: corev1.ProtocolTCP},
 							{Name: "https", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
 						},
-						ReadinessProbe: puppetStatusProbe(8080, corev1.URISchemeHTTP),
+						ReadinessProbe: localStatusProbe(8080),
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "db-database", MountPath: "/etc/puppetlabs/puppetdb/conf.d/database.ini", SubPath: "database.ini", ReadOnly: true},
 							{Name: "db-config", MountPath: "/etc/puppetlabs/puppetdb/conf.d/jetty.ini", SubPath: "jetty.ini", ReadOnly: true},
@@ -247,7 +248,6 @@ access-log-config = /etc/puppetlabs/puppetdb/request-logging.xml
 		Spec: corev1.ServiceSpec{
 			Selector: voxClusterLabels(cluster.Name, "db"),
 			Ports: []corev1.ServicePort{
-				{Name: "http", Port: 8080, TargetPort: intstr.FromInt32(8080), Protocol: corev1.ProtocolTCP},
 				{Name: "https", Port: 8081, TargetPort: intstr.FromInt32(8081), Protocol: corev1.ProtocolTCP},
 			},
 		},
