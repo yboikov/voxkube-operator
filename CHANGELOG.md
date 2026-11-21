@@ -8,7 +8,15 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Security
+- The PSK autosign script parsed `openssl req -text` output with `sed`, which depended on the OpenSSL version and on
+  how the key was encoded. It now runs in Puppet's Ruby: the CSR is decoded as ASN.1, its signature is verified,
+  and the key is compared in constant time; any error denies (#39).
+
 ### Added
+- `autosignMode: psk` also accepts the key in the `pp_preshared_key` extension request (#39).
+- VoxDiscovery warns (Ready message and a `HighCardinalityLabels` event) when per-target labels split machines
+  into almost one EndpointSlice each (#39).
 - `VoxCluster.spec.code.git.branches`: deploy only the listed branches. Pushes to other branches no longer roll the
   compilers or trigger a sidecar redeploy, a broken `Puppetfile` on a feature branch can't break the cluster's
   code sync, and agents can't pick unrelated environments. Empty keeps every branch (#46).

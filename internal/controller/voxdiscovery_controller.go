@@ -218,6 +218,9 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Reason:             "Synced",
 		Message:            discoverySyncedMessage(discoveredCount, sliceCount, skippedLabels),
 	})
+	if highSliceCardinality(discoveredCount, sliceCount) {
+		r.event(disc, corev1.EventTypeWarning, "HighCardinalityLabels", discoverySyncedMessage(discoveredCount, sliceCount, skippedLabels))
+	}
 
 	if err := r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status); err != nil {
 		return ctrl.Result{}, err
@@ -756,7 +759,25 @@ func discoverySyncedMessage(nodes, slices int32, skippedLabels int) string {
 	if skippedLabels > 0 {
 		msg += fmt.Sprintf("; skipped %d target label(s) with an invalid name or value", skippedLabels)
 	}
+	if highSliceCardinality(nodes, slices) {
+		msg += "; WARNING: almost one EndpointSlice per machine. An endpointLabels fact or monitoring.voxkube.io/* " +
+			"label has (nearly) a different value on every machine (e.g. an IP, kernel version or uptime); " +
+			"use low-cardinality values such as role, environment or datacenter"
+	}
 	return msg
+}
+
+// highSliceCardinality reports when per-target labels split the machines into so many groups that EndpointSlices
+// no longer batch them: more than 10 slices averaging fewer than 2 machines each.
+func highSliceCardinality(nodes, slices int32) bool {
+	return slices > 10 && slices*2 > nodes
+}
+
+func (r *VoxDiscoveryReconciler) event(obj runtime.Object, eventType, reason, msg string) {
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(obj, nil, eventType, reason, reason, "%s", msg)
 }
 
 func sortedKeys(m map[string]string) []string {
