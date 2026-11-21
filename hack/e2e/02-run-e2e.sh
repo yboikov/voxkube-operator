@@ -31,7 +31,9 @@ assert_eq() {
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if printf '%s' "$haystack" | grep -qF -- "$needle"; then
+  # Use a here-string rather than a pipe so grep -qF exiting early on >64 KiB
+  # payloads (e.g. node_exporter /metrics) never triggers SIGPIPE under pipefail.
+  if grep -qF -- "$needle" <<< "$haystack"; then
     pass "${label}"
   else
     fail "${label}: expected to contain '${needle}', got: $(printf '%s' "$haystack" | head -c 400)"
@@ -40,7 +42,7 @@ assert_contains() {
 
 assert_not_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if ! printf '%s' "$haystack" | grep -qF -- "$needle"; then
+  if ! grep -qF -- "$needle" <<< "$haystack"; then
     pass "${label}"
   else
     fail "${label}: expected NOT to contain '${needle}'"
@@ -75,7 +77,7 @@ cleanup_before_run() {
   kubectl -n "${NAMESPACE}" delete voxnode --all --ignore-not-found --timeout=30s >/dev/null 2>&1 || true
   # Clean retained CA PVC + Secret + test secrets so every E2E run starts fresh
   kubectl -n "${NAMESPACE}" delete pvc "${CLUSTER}-ca-data" --ignore-not-found >/dev/null 2>&1 || true
-  kubectl -n "${NAMESPACE}" delete secret "${CLUSTER}-ca-tls" e2e-role-secret e2e-git-https e2e-git-ssh --ignore-not-found >/dev/null 2>&1 || true
+  kubectl -n "${NAMESPACE}" delete secret "${CLUSTER}-ca-tls" e2e-role-secret e2e-git-https e2e-git-ssh e2e-autosign-psk --ignore-not-found >/dev/null 2>&1 || true
   kubectl delete namespace "${INFRA_NS}" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
   wait_for "old cluster pods removed" 60 "[ -z \"\$(kubectl -n ${NAMESPACE} get pods -l app.kubernetes.io/instance=${CLUSTER} -o name 2>/dev/null)\" ]" || true
 }
@@ -427,6 +429,49 @@ docker exec "${AGENT_CONTAINER}" /opt/puppetlabs/bin/puppet agent -t >/dev/null 
 GIT_TXT2=$(docker exec "${AGENT_CONTAINER}" cat /etc/voxkube-git.txt 2>/dev/null || true)
 assert_contains "Agent received GitRev=v2 after synchronized rollout" "${GIT_TXT2}" "GitRev=v2"
 
+# Test spec.code.git.branches: create an unrelated branch dev_ignored and verify g10k only deploys
+# production and pushes to dev_ignored do NOT roll the compilers.
+kubectl -n "${INFRA_NS}" exec deploy/git-server -- sh -eu -c '
+W=/tmp/branch-test
+rm -rf "$W"
+git clone /srv/git/control.git "$W"
+cd "$W"
+git config user.email "e2e@voxkube.local"
+git config user.name "VoxKube E2E"
+git checkout -b dev_ignored
+echo "# dev only" >> manifests/site.pp
+git commit -am "Create dev_ignored branch"
+git push origin dev_ignored
+rm -rf "$W"
+' >/dev/null 2>&1
+
+kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{"spec":{"code":{"git":{"branches":["production"]}}}}'
+wait_for "g10k ConfigMap updated with filter_regex for production" 30 "kubectl -n ${NAMESPACE} get cm ${CLUSTER}-g10k -o jsonpath='{.data.g10k\.yaml}' | grep -qF 'filter_regex'"
+wait_for "server Deployment updated with VOXKUBE_GIT_BRANCHES" 30 "kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-server -o json | grep -qF 'VOXKUBE_GIT_BRANCHES'"
+kubectl -n "${NAMESPACE}" rollout status "deployment/${CLUSTER}-server" --timeout=240s
+
+SRV_POD_ONE=$(kubectl -n "${NAMESPACE}" get pod -l "app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=server" -o jsonpath='{.items[0].metadata.name}')
+DEPLOYED_ENVS=$(kubectl -n "${NAMESPACE}" exec "${SRV_POD_ONE}" -c openvox-server -- ls -1 /etc/puppetlabs/code/environments)
+assert_contains "spec.code.git.branches deployed production environment" "${DEPLOYED_ENVS}" "production"
+assert_not_contains "spec.code.git.branches excluded dev_ignored environment" "${DEPLOYED_ENVS}" "dev_ignored"
+
+REV_BEFORE_DEV=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath='{.spec.template.metadata.annotations.voxkube\.io/code-revision}')
+kubectl -n "${INFRA_NS}" exec deploy/git-server -- sh -eu -c '
+W=/tmp/branch-bump
+rm -rf "$W"
+git clone -b dev_ignored /srv/git/control.git "$W"
+cd "$W"
+git config user.email "e2e@voxkube.local"
+git config user.name "VoxKube E2E"
+echo "# second dev commit" >> manifests/site.pp
+git commit -am "Update dev_ignored"
+git push origin dev_ignored
+rm -rf "$W"
+' >/dev/null 2>&1
+sleep 20
+REV_AFTER_DEV=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath='{.spec.template.metadata.annotations.voxkube\.io/code-revision}')
+assert_eq "Push to unselected branch dev_ignored did NOT change code-revision" "${REV_AFTER_DEV}" "${REV_BEFORE_DEV}"
+
 # Test voxkube.io/sync-now rolls compilers even when HEAD did not move
 OLD_REV=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath='{.spec.template.metadata.annotations.voxkube\.io/code-revision}')
 SYNC_VAL="e2e-$(date +%s)"
@@ -575,7 +620,61 @@ else
   pass "autoCreateVoxNode did NOT resurrect cleaned node ${AGENT_CERTNAME}"
 fi
 
-log "12. Testing component pruning (database.enabled=false, hieraSecrets.enabled=false) & CA retention"
+log "12. Testing Ruby PSK autosign (pp_preshared_key: bad key rejected, valid key autosigned)"
+kubectl -n "${NAMESPACE}" create secret generic e2e-autosign-psk --from-literal=psk="super-psk-e2e-key-2026"
+kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{"spec":{"ca":{"autosignMode":"psk","pskSecretRef":"e2e-autosign-psk"}}}'
+wait_for "CA StatefulSet updated with autosign-psk volume" 30 "kubectl -n ${NAMESPACE} get sts ${CLUSTER}-ca -o jsonpath='{.spec.template.spec.volumes[*].name}' | grep -qF 'autosign-psk'"
+kubectl -n "${NAMESPACE}" rollout status "statefulset/${CLUSTER}-ca" --timeout=180s
+
+# Wrong pp_preshared_key must NOT be autosigned
+BAD_PSK_RC=0
+docker run --rm \
+  --add-host "puppet-ca.e2e.local:${VPS_IP}" \
+  voxkube-e2e-agent:el9 sh -eu -c "
+mkdir -p /etc/puppetlabs/puppet
+cat <<'CONF' > /etc/puppetlabs/puppet/puppet.conf
+[main]
+certname = psk-bad.e2e.local
+ca_server = puppet-ca.e2e.local
+ca_port = ${CA_PORT}
+CONF
+cat <<'CSR' > /etc/puppetlabs/puppet/csr_attributes.yaml
+---
+extension_requests:
+  pp_preshared_key: wrong-psk-value
+CSR
+/opt/puppetlabs/bin/puppet ssl bootstrap --waitforcert 0 >/dev/null 2>&1
+" || BAD_PSK_RC=$?
+if [ "${BAD_PSK_RC}" -ne 0 ]; then
+  pass "Ruby PSK autosign rejected CSR with wrong pp_preshared_key"
+else
+  fail "Ruby PSK autosign unexpectedly signed CSR with wrong pp_preshared_key!"
+fi
+
+# Valid pp_preshared_key must be autosigned immediately
+if docker run --rm \
+  --add-host "puppet-ca.e2e.local:${VPS_IP}" \
+  voxkube-e2e-agent:el9 sh -eu -c "
+mkdir -p /etc/puppetlabs/puppet
+cat <<'CONF' > /etc/puppetlabs/puppet/puppet.conf
+[main]
+certname = psk-ok.e2e.local
+ca_server = puppet-ca.e2e.local
+ca_port = ${CA_PORT}
+CONF
+cat <<'CSR' > /etc/puppetlabs/puppet/csr_attributes.yaml
+---
+extension_requests:
+  pp_preshared_key: super-psk-e2e-key-2026
+CSR
+/opt/puppetlabs/bin/puppet ssl bootstrap --waitforcert 15 >/dev/null 2>&1 && test -s /etc/puppetlabs/puppet/ssl/certs/psk-ok.e2e.local.pem
+"; then
+  pass "Ruby PSK autosign immediately signed CSR with valid pp_preshared_key"
+else
+  fail "Ruby PSK autosign failed to sign CSR with valid pp_preshared_key!"
+fi
+
+log "13. Testing component pruning (database.enabled=false, hieraSecrets.enabled=false) & CA retention"
 kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{
   "spec": {
     "database": { "enabled": false },
