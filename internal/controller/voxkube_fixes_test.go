@@ -66,7 +66,7 @@ func TestBuildDiscoveryPQL(t *testing.T) {
 		PQL:         `facts.os.family = "RedHat"`,
 	})
 	for _, want := range []string{
-		`inventory[certname, environment, facts] {`,
+		`inventory[certname, environment, facts, trusted] {`,
 		`certname in nodes[certname] { node_state = "active" }`,
 		`environment = "prod\"uction"`,
 		`title = "Profile::Node_exporter"`,

@@ -39,6 +39,10 @@ resources:
 metrics:
   enabled: true
   port: 8080
+  # VoxNode labels monitoring.voxkube.io/<name> copied onto every voxkube_node_* series (empty where a node
+  # lacks one). The list is fixed so that labelling one VoxNode never changes the series of all the others.
+  nodeLabels:
+    - alerts
   service:
     enabled: true
 

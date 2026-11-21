@@ -38,6 +38,7 @@ func main() {
 	var probeAddr string
 	var enableLeaderElection bool
 	var watchNamespace string
+	var nodeMetricLabels string
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.BoolVar(&secureMetrics, "metrics-secure", false, "Serve metrics over HTTPS and require an authenticated, authorized client.")
@@ -45,6 +46,8 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false, "Enable leader election for controller manager.")
 	flag.StringVar(&watchNamespace, "watch-namespace", "", "Namespace to restrict the operator to. If empty, watches all namespaces.")
+	flag.StringVar(&nodeMetricLabels, "node-metric-labels", controller.DefaultNodeMetricLabels,
+		"Comma-separated VoxNode labels monitoring.voxkube.io/<name> exported as labels on the voxkube_node_* metrics.")
 
 	opts := zap.Options{Development: false}
 	var showVersion bool
@@ -88,7 +91,12 @@ func main() {
 	}
 
 	// Per-VoxNode Puppet run metrics (voxkube_node_*), read from the manager's cache on every scrape.
-	crmetrics.Registry.MustRegister(&controller.NodeMetricsCollector{Reader: mgr.GetClient()})
+	metricLabels, err := controller.ParseNodeMetricLabels(nodeMetricLabels)
+	if err != nil {
+		setupLog.Error(err, "invalid --node-metric-labels")
+		os.Exit(1)
+	}
+	crmetrics.Registry.MustRegister(&controller.NodeMetricsCollector{Reader: mgr.GetClient(), Labels: metricLabels})
 
 	if err = (&controller.VoxClusterReconciler{
 		Client:         mgr.GetClient(),

@@ -824,7 +824,7 @@ Printer columns: `.spec.clusterRef`, `.status.discoveredNodes`, `.status.endpoin
 The operator runs this PQL query over mTLS (`GET <databaseURL>/pdb/query/v4?query=…`):
 
 ```
-inventory[certname, environment, facts] {
+inventory[certname, environment, facts, trusted] {
   certname in nodes[certname] { node_state = "active" }
   and environment = "<environment>"
   and certname in resources[certname] { type = "Class" and title = "Profile::Node_exporter" }   # per class
