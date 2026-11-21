@@ -311,7 +311,7 @@ func (r *VoxClusterReconciler) reconcileENCConfigMap(ctx context.Context, cluste
 	data := make(map[string]string)
 	for i := range nodeList.Items {
 		n := &nodeList.Items[i]
-		if n.Spec.ClusterRef != cluster.Name || n.Spec.State == openvoxv1alpha1.NodeStateDecommissioned || n.Spec.Certname == "" {
+		if !nodeServedBy(n, cluster) {
 			continue
 		}
 		encYAML, err := RenderVoxNodeENCYAML(n, cluster)

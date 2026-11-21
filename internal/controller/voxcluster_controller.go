@@ -492,12 +492,15 @@ func (r *VoxClusterReconciler) createOrUpdateUnstructured(ctx context.Context, d
 	existing.SetGroupVersionKind(desired.GroupVersionKind())
 	err := r.Get(ctx, types.NamespacedName{Namespace: desired.GetNamespace(), Name: desired.GetName()}, existing)
 	if apierrors.IsNotFound(err) {
+		stampAppliedHash(desired)
 		return r.Create(ctx, desired)
 	}
 	if err != nil {
 		return err
 	}
-	desired.SetResourceVersion(existing.GetResourceVersion())
+	if !prepareUnstructuredUpdate(existing, desired) {
+		return nil
+	}
 	return r.Update(ctx, desired)
 }
 

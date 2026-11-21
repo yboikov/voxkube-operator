@@ -498,13 +498,13 @@ func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
 	existing.SetGroupVersionKind(smObj.GroupVersionKind())
 	err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, existing)
 	if apierrors.IsNotFound(err) {
+		stampAppliedHash(smObj)
 		if createErr := r.Create(ctx, smObj); createErr != nil {
 			if !meta.IsNoMatchError(createErr) && !strings.Contains(createErr.Error(), "no matches for kind \"ServiceMonitor\"") {
 				return scraperSecName, createErr
 			}
 		}
-	} else if err == nil {
-		smObj.SetResourceVersion(existing.GetResourceVersion())
+	} else if err == nil && prepareUnstructuredUpdate(existing, smObj) {
 		if updErr := r.Update(ctx, smObj); updErr != nil {
 			return scraperSecName, updErr
 		}

@@ -371,7 +371,10 @@ func (r *VoxClusterReconciler) autoCreateVoxNodes(ctx context.Context, cluster *
 	}
 	known := map[string]bool{}
 	for _, n := range nodes.Items {
-		known[n.Spec.Certname] = true
+		// Only this cluster's VoxNodes count: another VoxCluster in the namespace may manage the same certname.
+		if n.Spec.ClusterRef == cluster.Name {
+			known[n.Spec.Certname] = true
+		}
 	}
 
 	serverCert := serviceCertname(cluster)

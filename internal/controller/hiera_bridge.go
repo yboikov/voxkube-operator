@@ -94,7 +94,7 @@ func RenderHieraSecretsBundle(
 
 	// 3. Collect per-VoxNode explicit Secrets and multi-certificate cert-manager TLS Secrets
 	for _, node := range nodes {
-		if node.Spec.ClusterRef != cluster.Name || node.Spec.State == openvoxv1alpha1.NodeStateDecommissioned {
+		if !nodeServedBy(&node, cluster) {
 			continue
 		}
 		certname := node.Spec.Certname
