@@ -64,22 +64,26 @@ for _ in $(seq 1 60); do
 done
 kubectl get nodes
 
-# 5. Build reusable openvox-agent Docker image (EL9 / UBI9 + OpenVox 8 agent)
+# 5. Build reusable openvox-agent Docker image (EL9 / UBI9 + OpenVox 8 agent + staged node_exporter binary)
 AGENT_DIR="${BUILD_DIR}/agent-image"
 mkdir -p "${AGENT_DIR}"
 cat <<'EOF' > "${AGENT_DIR}/Dockerfile"
 FROM registry.access.redhat.com/ubi9/ubi:latest
+ARG NODE_EXPORTER_VERSION=1.9.0
 RUN dnf install -y https://yum.voxpupuli.org/openvox8-release-el-9.noarch.rpm && \
-    dnf install -y --setopt=install_weak_deps=False openvox-agent procps-ng iproute && \
-    dnf clean all
+    dnf install -y --setopt=install_weak_deps=False openvox-agent procps-ng iproute tar gzip && \
+    dnf clean all && \
+    curl -fsSL "https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz" \
+      | tar -xzf - -C /tmp && \
+    install -d -m 0755 /usr/local/share/node_exporter && \
+    install -m 0755 "/tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter" /usr/local/share/node_exporter/node_exporter && \
+    rm -rf "/tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64"
 ENV PATH="/opt/puppetlabs/bin:/opt/puppetlabs/puppet/bin:${PATH}"
 CMD ["sleep", "infinity"]
 EOF
 
-if ! docker image inspect voxkube-e2e-agent:el9 >/dev/null 2>&1; then
-  echo "Building voxkube-e2e-agent:el9..."
-  docker build -t voxkube-e2e-agent:el9 "${AGENT_DIR}"
-fi
+echo "Building voxkube-e2e-agent:el9..."
+docker build -q -t voxkube-e2e-agent:el9 "${AGENT_DIR}" >/dev/null
 
 # 6. Build tiny self-contained Git HTTP+SSH test server image (for g10k httpsToken + sshKey tests)
 GIT_DIR="${BUILD_DIR}/git-server-image"
@@ -123,8 +127,43 @@ if [ ! -d /srv/git/control.git ]; then
   git config user.email "e2e@voxkube.local"
   git config user.name "VoxKube E2E"
   git checkout -b production
-  mkdir -p manifests modules/profile/manifests
-  cat <<'NGINXPP' > modules/profile/manifests/nginx.pp
+  mkdir -p manifests data/roles site/role/manifests site/profile/manifests
+  cat <<'ENVCONF' > environment.conf
+modulepath = site:modules:$basemodulepath
+ENVCONF
+  cat <<'PUPPETFILE' > Puppetfile
+forge 'https://forgeapi.puppet.com'
+
+mod 'puppetlabs-stdlib', '9.6.0'
+PUPPETFILE
+  cat <<'HIERA' > hiera.yaml
+---
+version: 5
+defaults:
+  datadir: data
+  data_hash: yaml_data
+hierarchy:
+  - name: "Per-role data"
+    path: "roles/%{role}.yaml"
+  - name: "Common data"
+    path: "common.yaml"
+HIERA
+  cat <<'COMMONYAML' > data/common.yaml
+---
+profile::node_exporter::listen_port: 9100
+COMMONYAML
+  cat <<'ROLEYAML' > data/roles/webserver.yaml
+---
+profile::node_exporter::listen_port: 9100
+profile::node_exporter::extra_flags: "--collector.textfile.directory=/var/lib/node_exporter/textfile_collector"
+ROLEYAML
+  cat <<'ROLEPP' > site/role/manifests/webserver.pp
+class role::webserver {
+  include profile::nginx
+  include profile::node_exporter
+}
+ROLEPP
+  cat <<'NGINXPP' > site/profile/manifests/nginx.pp
 class profile::nginx {
   $port = getvar('http_port') ? { undef => '80', default => getvar('http_port') }
   file { '/etc/voxkube-nginx.conf':
@@ -134,12 +173,66 @@ class profile::nginx {
   }
 }
 NGINXPP
+  cat <<'EXPORTERPP' > site/profile/manifests/node_exporter.pp
+class profile::node_exporter (
+  Integer $listen_port = 9100,
+  String  $extra_flags = '',
+) {
+  $role  = getvar('role') ? { undef => 'unknown', default => getvar('role') }
+  $clust = getvar('voxkube_cluster') ? { undef => 'unknown', default => getvar('voxkube_cluster') }
+
+  file { ['/etc/node_exporter', '/var/lib/node_exporter', '/var/lib/node_exporter/textfile_collector']:
+    ensure => directory,
+    mode   => '0755',
+  }
+
+  # Exercises puppetlabs-stdlib custom resource type (deployed via Puppetfile + g10k + puppet generate types)
+  file { '/etc/node_exporter/exporter.env':
+    ensure => file,
+    mode   => '0644',
+  }
+  file_line { 'node_exporter_port':
+    path    => '/etc/node_exporter/exporter.env',
+    line    => "NODE_EXPORTER_PORT=${listen_port}",
+    match   => '^NODE_EXPORTER_PORT=',
+    require => File['/etc/node_exporter/exporter.env'],
+  }
+
+  file { '/var/lib/node_exporter/textfile_collector/voxkube.prom':
+    ensure  => file,
+    mode    => '0644',
+    content => "# HELP voxkube_managed_node_info Node configured by VoxKube Puppet control-repo\n# TYPE voxkube_managed_node_info gauge\nvoxkube_managed_node_info{role=\"${role}\",cluster=\"${clust}\"} 1\n",
+    require => File['/var/lib/node_exporter/textfile_collector'],
+  }
+
+  file { '/usr/local/bin/node_exporter':
+    ensure => file,
+    source => '/usr/local/share/node_exporter/node_exporter',
+    mode   => '0755',
+  }
+
+  exec { 'start-node-exporter':
+    command => "/bin/sh -c 'setsid /usr/local/bin/node_exporter --web.listen-address=:${listen_port} ${extra_flags} </dev/null >/var/log/node_exporter.log 2>&1 &'",
+    unless  => '/usr/bin/pgrep -x node_exporter',
+    require => [
+      File['/usr/local/bin/node_exporter'],
+      File['/var/lib/node_exporter/textfile_collector/voxkube.prom'],
+      File_line['node_exporter_port'],
+    ],
+  }
+}
+EXPORTERPP
   cat <<'SITEPP' > manifests/site.pp
 node default {
   $role  = getvar('role') ? { undef => 'default', default => getvar('role') }
   $clust = getvar('voxkube_cluster') ? { undef => 'unknown', default => getvar('voxkube_cluster') }
   $token = lookup('secret_token', Optional[Sensitive[String]], 'first', undef)
   $has_secret = $token ? { undef => 'no', default => 'yes' }
+
+  if $role == 'webserver' {
+    include role::webserver
+  }
+
   file { '/etc/voxkube-git.txt':
     ensure  => file,
     content => "GitRev=v1\nNode=${trusted['certname']}\nCluster=${clust}\nRole=${role}\nHasSecret=${has_secret}\n",
