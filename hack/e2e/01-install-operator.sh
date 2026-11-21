@@ -10,7 +10,7 @@ if [ -z "${VOXKUBE_VERSION:-}" ]; then
   if [ -f "${CHART_YAML}" ]; then
     VOXKUBE_VERSION="$(awk '/^version:/ {print $2; exit}' "${CHART_YAML}")"
   else
-    VOXKUBE_VERSION="0.2.8"
+    VOXKUBE_VERSION="0.2.9"
   fi
 fi
 

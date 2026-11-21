@@ -14,10 +14,10 @@ Copy `hack/e2e/` to your test host (or clone the repo on it) and run:
 
 ```bash
 # Test a full release:
-VOXKUBE_VERSION=0.2.8 ./hack/e2e/run-all.sh
+VOXKUBE_VERSION=0.2.9 ./hack/e2e/run-all.sh
 
 # Test a pre-release that also changed images/openvox-server/ (override the server image tag):
-VOXKUBE_VERSION=0.2.9-rc.1 \
+VOXKUBE_VERSION=0.2.10-rc.1 \
   SERVER_IMAGE=ghcr.io/yboikov/openvox-server:8.18.0-5d2c2cf \
   ./hack/e2e/run-all.sh
 ```
@@ -43,7 +43,7 @@ Or run stages individually:
 
 | Variable | Default | Description |
 |---|---|---|
-| `VOXKUBE_VERSION` | `Chart.yaml` version (or `0.2.8`) | Operator chart & CRD release version (without leading `v`) |
+| `VOXKUBE_VERSION` | `Chart.yaml` version (or `0.2.9`) | Operator chart & CRD release version (without leading `v`) |
 | `SERVER_IMAGE` | *(chart/operator default)* | Optional override for `VoxCluster.spec.server.image` |
 | `NAMESPACE` | `openvox` | Namespace for the operator and test `VoxCluster` |
 | `CLUSTER` | `e2e` | Test `VoxCluster` name |
