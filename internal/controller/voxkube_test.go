@@ -197,15 +197,32 @@ func TestVoxClusterReconciler_FullStackAndOpenShiftCompliance(t *testing.T) {
 		t.Errorf("expected CA PVC without owner references, got %v", caPVC.OwnerReferences)
 	}
 
-	// 6. Service certificate covers the compiler, CA and DB Services and the external hostname
-	block, _ := pem.Decode(caSec.Data["tls.crt"])
-	leaf, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatal(err)
+	// 6. Each component's certificate covers its own Services and external hostname, and only those.
+	sans := func(secret string) []string {
+		sec := &corev1.Secret{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: secret}, sec); err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(sec.Data["tls.crt"])
+		leaf, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return leaf.DNSNames
 	}
-	for _, want := range []string{"production-db.openvox.svc", "production-ca.openvox.svc.cluster.local", "puppet.apps.ocp.example.com", "puppet-ca.apps.ocp.example.com"} {
-		if !slices.Contains(leaf.DNSNames, want) {
-			t.Errorf("expected service certificate SAN %q, got %v", want, leaf.DNSNames)
+	for secret, want := range map[string][]string{
+		"production-ca-tls":     {"production-ca.openvox.svc.cluster.local", "puppet-ca.apps.ocp.example.com"},
+		"production-server-tls": {"production.openvox.svc", "puppet.apps.ocp.example.com"},
+		"production-db-tls":     {"production-db.openvox.svc"},
+	} {
+		got := sans(secret)
+		for _, w := range want {
+			if !slices.Contains(got, w) {
+				t.Errorf("%s: expected SAN %q, got %v", secret, w, got)
+			}
+		}
+		if secret == "production-db-tls" && slices.Contains(got, "puppet.apps.ocp.example.com") {
+			t.Errorf("the DB certificate must not carry the compilers' hostname")
 		}
 	}
 
