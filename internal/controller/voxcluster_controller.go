@@ -133,6 +133,11 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, st *clusterState) error {
 	logger := log.FromContext(ctx)
 
+	// 0. Remove what components that were switched off left behind.
+	if err := r.pruneDisabledComponents(ctx, cluster); err != nil {
+		return fmt.Errorf("pruning disabled components: %w", err)
+	}
+
 	// 1. CA key material and the shared service certificate (<cluster>-ca-tls).
 	secName, tlsHash, err := r.reconcileCAPKI(ctx, cluster)
 	if err != nil {

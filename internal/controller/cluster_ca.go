@@ -142,13 +142,29 @@ if [ ! -f "$CADIR/ca_crt.pem" ]; then
   chmod 0640 "$CADIR/ca_key.pem"
 fi
 
+# The CA on the PVC must be the one in the CA Secret (which signs the service certificate). They differ when the
+# PVC and the Secret were restored from different backups or the Secret was regenerated: compilers would then
+# trust a CA that doesn't sign anything. Refuse to start instead of serving a split CA.
+# Compare the certificates' public keys (stable across CA certificate renewal); without openssl, the key files.
+if command -v openssl >/dev/null 2>&1; then
+  pvc_key=$(openssl x509 -noout -pubkey -in "$CADIR/ca_crt.pem")
+  secret_key=$(openssl x509 -noout -pubkey -in /etc/puppetlabs/puppet/ssl-certs/ca.crt)
+else
+  pvc_key=$(cat "$CADIR/ca_pub.pem")
+  secret_key=$(cat /etc/puppetlabs/puppet/ssl-certs/ca.pub)
+fi
+if [ "$pvc_key" != "$secret_key" ]; then
+  echo "FATAL: the CA key on the PVC ($CADIR) does not match the CA Secret. Restore the CA Secret %s together with the PVC it belongs to." >&2
+  exit 1
+fi
+
 cp "$CADIR/ca_crt.pem" "$SSLDIR/certs/ca.pem"
 cp "$CADIR/ca_crl.pem" "$SSLDIR/crl.pem"
 cp /etc/puppetlabs/puppet/ssl-certs/tls.crt "$SSLDIR/certs/${CERTNAME}.pem"
 cp /etc/puppetlabs/puppet/ssl-certs/tls.key "$SSLDIR/private_keys/${CERTNAME}.pem"
 cp /etc/puppetlabs/puppet/ssl-certs/tls.pub "$SSLDIR/public_keys/${CERTNAME}.pem"
 chmod 0640 "$SSLDIR/private_keys/${CERTNAME}.pem"
-`, caDir, certname)
+`, caDir, certname, caSecretName(cluster))
 
 	caCM := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{

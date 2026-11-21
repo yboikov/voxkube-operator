@@ -170,7 +170,7 @@ func TestENCModesMetadataAndReports(t *testing.T) {
 		},
 	}
 	script := renderENCScript(cluster)
-	if !strings.Contains(script, `curl -fsS --max-time 10 'https://enc.example.com/nodes'"/${CERTNAME}"`) {
+	if !strings.Contains(script, `curl -sS --max-time 10 -o "$BODY" -w '%{http_code}' 'https://enc.example.com/nodes'"/${CERTNAME}"`) {
 		t.Errorf("expected external ENC fallback, got:\n%s", script)
 	}
 	def := string(renderDefaultENC(cluster))

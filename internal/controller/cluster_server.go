@@ -130,10 +130,26 @@ fi
 `)
 	if encMode(cluster) == encModeExternalHTTP {
 		if nc := cluster.Spec.Workflows.NodeClassification; nc != nil && nc.ExternalURL != "" {
-			fmt.Fprintf(&b, `if OUT=$(curl -fsS --max-time 10 %s"/${CERTNAME}"); then
-  printf '%%s\n' "$OUT"
-  exit 0
-fi
+			// 200 classifies the node, 404 means "not known there" and falls back to the default; anything else
+			// (5xx, timeout, connection refused) fails the catalog request instead of silently compiling the default.
+			fmt.Fprintf(&b, `BODY=$(mktemp) || exit 1
+CODE=$(curl -sS --max-time 10 -o "$BODY" -w '%%{http_code}' %s"/${CERTNAME}") || CODE=000
+case "$CODE" in
+  200)
+    cat "$BODY"
+    rm -f "$BODY"
+    exit 0
+    ;;
+  404)
+    rm -f "$BODY"
+    ;;
+  *)
+    echo "external ENC returned HTTP $CODE for ${CERTNAME}" >&2
+    head -c 2000 "$BODY" >&2
+    rm -f "$BODY"
+    exit 1
+    ;;
+esac
 `, shellSingleQuote(strings.TrimRight(nc.ExternalURL, "/")))
 		}
 	}
