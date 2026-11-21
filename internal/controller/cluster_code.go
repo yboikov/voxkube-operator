@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -54,7 +55,8 @@ type codePlan struct {
 	message string
 }
 
-// g10kDeployScript deploys every branch of the control-repo with g10k and optionally generates resource types.
+// g10kDeployScript deploys the control-repo's branches (all, or VOXKUBE_GIT_BRANCHES) with g10k and optionally
+// generates resource types.
 const g10kDeployScript = `#!/bin/sh
 # Rendered by voxkube-operator. Deploys the control-repo with g10k.
 set -eu
@@ -97,14 +99,27 @@ fi
 STATE=` + codeDir + `/.voxkube-deployed-refs
 CACHE=` + g10kCacheDir + `
 ENVDIR=` + codeDir + `/environments
+# VOXKUBE_GIT_BRANCHES (space-separated, validated by the CRD: no spaces or glob characters) limits the branches
+# that are hashed here and deployed by g10k (filter_regex in g10k.yaml); empty means every branch.
 refs=""
 if [ -n "${VOXKUBE_GIT_REMOTE:-}" ]; then
-  if ! out=$(git ls-remote --heads "$VOXKUBE_GIT_REMOTE"); then
+  set -f
+  patterns=""
+  for b in ${VOXKUBE_GIT_BRANCHES:-}; do
+    patterns="$patterns refs/heads/$b"
+  done
+  # shellcheck disable=SC2086 # one argument per branch
+  if ! out=$(git ls-remote --heads "$VOXKUBE_GIT_REMOTE" $patterns); then
     echo "ERROR: git ls-remote $VOXKUBE_GIT_REMOTE failed; not deploying" >&2
     exit 1
   fi
+  set +f
   if [ -z "$out" ]; then
-    echo "ERROR: $VOXKUBE_GIT_REMOTE has no branches; not deploying" >&2
+    if [ -n "${VOXKUBE_GIT_BRANCHES:-}" ]; then
+      echo "ERROR: none of the branches ($VOXKUBE_GIT_BRANCHES) exist on $VOXKUBE_GIT_REMOTE; not deploying" >&2
+    else
+      echo "ERROR: $VOXKUBE_GIT_REMOTE has no branches; not deploying" >&2
+    fi
     exit 1
   fi
   refs=$(printf '%s\n' "$out" | sha256sum | cut -d' ' -f1)
@@ -166,8 +181,13 @@ func yamlSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// renderG10kConfig renders the g10k.yaml for a control-repo.
-func renderG10kConfig(remote string) string {
+// renderG10kConfig renders the g10k.yaml for a control-repo. With branches, g10k deploys only those (filter_regex
+// is matched against the bare branch name) and purges environments of other branches.
+func renderG10kConfig(remote string, branches []string) string {
+	filter := ""
+	if re := branchFilterRegex(branches); re != "" {
+		filter = "    filter_regex: " + yamlSingleQuote(re) + "\n"
+	}
 	return fmt.Sprintf(`---
 :cachedir: '%s'
 use_cache_fallback: true
@@ -177,7 +197,19 @@ sources:
     basedir: '%s/environments/'
     prefix: false
     invalid_branches: 'correct'
-`, g10kCacheDir, yamlSingleQuote(remote), codeDir)
+%s`, g10kCacheDir, yamlSingleQuote(remote), codeDir, filter)
+}
+
+// branchFilterRegex is an anchored regex matching exactly the given branch names ("" for all branches).
+func branchFilterRegex(branches []string) string {
+	if len(branches) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(branches))
+	for i, b := range branches {
+		quoted[i] = regexp.QuoteMeta(b)
+	}
+	return "^(" + strings.Join(quoted, "|") + ")$"
 }
 
 func demoPlan(reason, message string) *codePlan {
@@ -307,7 +339,7 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: cluster.Namespace, Labels: voxClusterLabels(cluster.Name, "g10k")},
 		Data: map[string]string{
-			"g10k.yaml":  renderG10kConfig(g.Remote),
+			"g10k.yaml":  renderG10kConfig(g.Remote, g.Branches),
 			"deploy.sh":  g10kDeployScript,
 			"sidecar.sh": g10kSidecarScript,
 			"askpass.sh": g10kAskpassScript,
@@ -345,6 +377,7 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 		{Name: "VOXKUBE_GENERATE_TYPES", Value: fmt.Sprintf("%t", generateTypes)},
 		{Name: "VOXKUBE_POLL_SECONDS", Value: fmt.Sprintf("%d", int(poll.Seconds()))},
 		{Name: "VOXKUBE_GIT_REMOTE", Value: g.Remote},
+		{Name: "VOXKUBE_GIT_BRANCHES", Value: strings.Join(g.Branches, " ")},
 	}
 	plan.initContainers = append(plan.initContainers, corev1.Container{
 		Name:            "g10k-init",
@@ -380,7 +413,9 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 		// Still report HEAD for visibility when the remote can be polled, but never without the credentials.
 		if r.GitPoller != nil && IsHTTPRemote(g.Remote) && !authFailed {
 			if rev, err := r.GitPoller.Resolve(ctx, g.Remote, pollAuth); err == nil {
-				plan.observedCommit = rev.Head
+				if rev, err = SelectBranches(rev, g.Branches); err == nil {
+					plan.observedCommit = rev.Head
+				}
 			}
 		}
 		return plan, nil
@@ -403,6 +438,10 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 		return plan, nil
 	}
 	rev, err := r.GitPoller.Resolve(ctx, g.Remote, pollAuth)
+	if err == nil {
+		// With spec.code.git.branches, only those branches count: other pushes don't roll the compilers.
+		rev, err = SelectBranches(rev, g.Branches)
+	}
 	if err != nil {
 		logger.Info("Git poll failed; keeping the current code revision", "remote", g.Remote, "reason", err.Error())
 		if prevRevision != "" {
@@ -421,7 +460,11 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	plan.podAnnotations[AnnotationObservedCommit] = rev.Head
 	if plan.ready {
 		plan.reason = codeReasonGit
-		plan.message = fmt.Sprintf("Compilers serve %s at %s (rolled on every branch change)", g.Remote, shortSHA(rev.Head))
+		scope := "every branch change"
+		if len(g.Branches) > 0 {
+			scope = "changes to " + strings.Join(g.Branches, ", ")
+		}
+		plan.message = fmt.Sprintf("Compilers serve %s at %s (rolled on %s)", g.Remote, shortSHA(rev.Head), scope)
 	}
 	return plan, nil
 }

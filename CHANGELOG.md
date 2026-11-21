@@ -8,6 +8,11 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Added
+- `VoxCluster.spec.code.git.branches`: deploy only the listed branches. Pushes to other branches no longer roll the
+  compilers or trigger a sidecar redeploy, a broken `Puppetfile` on a feature branch can't break the cluster's
+  code sync, and agents can't pick unrelated environments. Empty keeps every branch (#46).
+
 ## [0.2.8]
 
 Fixes the security, correctness and performance findings of the architecture review of 0.2.7 (#27, #28, #29, #30,

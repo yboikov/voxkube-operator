@@ -50,6 +50,11 @@ type GitCodeSpec struct {
 	// Remote is the Git repository URL for the Puppet control-repo. Every branch becomes a Puppet environment.
 	Remote string `json:"remote"`
 
+	// Branches limits code delivery to these branches (Puppet environments). Only they are deployed by g10k, and only pushes to them roll the compilers or trigger a sidecar redeploy. Empty means every branch.
+	// +optional
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9][A-Za-z0-9._/+@-]*$`
+	Branches []string `json:"branches,omitempty"`
+
 	// AuthType selects the Git authentication mechanism.
 	// +kubebuilder:validation:Enum=githubApp;sshKey;httpsToken;none
 	// +kubebuilder:default="githubApp"

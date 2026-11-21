@@ -33,6 +33,47 @@ type GitRevision struct {
 	Head string
 	// RefsHash is a stable hash over every refs/heads/* entry; it changes whenever any branch moves.
 	RefsHash string
+	// Branches maps branch names (without refs/heads/) to their commit SHA.
+	Branches map[string]string
+}
+
+// SelectBranches narrows rev to the given branches (all branches when the list is empty): RefsHash covers only
+// those, and Head is the commit of the first listed branch that exists. It fails when none of them exist, so a
+// typo or a deleted branch never looks like "no change".
+func SelectBranches(rev GitRevision, branches []string) (GitRevision, error) {
+	if len(branches) == 0 {
+		return rev, nil
+	}
+	var heads []string
+	head := ""
+	for _, b := range branches {
+		sha, ok := rev.Branches[b]
+		if !ok {
+			continue
+		}
+		if head == "" {
+			head = sha
+		}
+		heads = append(heads, "refs/heads/"+b+" "+sha)
+	}
+	if len(heads) == 0 {
+		return GitRevision{}, fmt.Errorf("none of the configured branches %v exist on the remote", branches)
+	}
+	selected := map[string]string{}
+	for _, b := range branches {
+		if sha, ok := rev.Branches[b]; ok {
+			selected[b] = sha
+		}
+	}
+	return GitRevision{Head: head, RefsHash: hashHeads(heads), Branches: selected}, nil
+}
+
+// hashHeads is the RefsHash of "refs/heads/<name> <sha>" entries.
+func hashHeads(heads []string) string {
+	sorted := append([]string{}, heads...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(sorted, "\n")))
+	return hex.EncodeToString(sum[:])[:16]
 }
 
 // GitRemotePoller polls a remote Git repository (outbound-only) to detect new commits without inbound webhooks.
@@ -237,16 +278,16 @@ func ParseRefAdvertisement(body []byte) (GitRevision, error) {
 	}
 
 	var heads []string
+	branches := map[string]string{}
 	for ref, sha := range refs {
-		if strings.HasPrefix(ref, "refs/heads/") {
+		if name, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
 			heads = append(heads, ref+" "+sha)
+			branches[name] = sha
 		}
 	}
 	if len(heads) == 0 && refs["HEAD"] == "" {
 		return GitRevision{}, fmt.Errorf("remote advertised no branches")
 	}
-	sort.Strings(heads)
-	sum := sha256.Sum256([]byte(strings.Join(heads, "\n")))
 
 	head := refs["HEAD"]
 	if head == "" {
@@ -257,5 +298,5 @@ func ParseRefAdvertisement(body []byte) (GitRevision, error) {
 			}
 		}
 	}
-	return GitRevision{Head: head, RefsHash: hex.EncodeToString(sum[:])[:16]}, nil
+	return GitRevision{Head: head, RefsHash: hashHeads(heads), Branches: branches}, nil
 }
