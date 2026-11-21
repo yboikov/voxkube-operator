@@ -7,7 +7,9 @@ import (
 	"testing"
 
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -165,5 +167,41 @@ func TestHPAUnchangedIsNotUpdated(t *testing.T) {
 	}
 	if hpa.Spec.MaxReplicas != maxR {
 		t.Errorf("unexpected HPA %+v", hpa.Spec)
+	}
+}
+
+func TestDiscoveryStatusWriteRetriesOnConflict(t *testing.T) {
+	ctx := context.Background()
+	s := newVoxKubeScheme(t)
+	off := false
+	cluster := &openvoxv1alpha1.VoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "prod", Namespace: "ovx"},
+		Spec:       openvoxv1alpha1.VoxClusterSpec{Database: openvoxv1alpha1.ClusterDatabaseSpec{Enabled: &off}},
+	}
+	disc := &openvoxv1alpha1.VoxDiscovery{
+		ObjectMeta: metav1.ObjectMeta{Name: "nodes", Namespace: "ovx"},
+		Spec:       openvoxv1alpha1.VoxDiscoverySpec{ClusterRef: "prod"},
+	}
+	base := fake.NewClientBuilder().WithScheme(s).WithObjects(cluster, disc).WithStatusSubresource(&openvoxv1alpha1.VoxDiscovery{}).Build()
+	conflicts := 1
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			if conflicts > 0 {
+				conflicts--
+				return apierrors.NewConflict(schema.GroupResource{Resource: "voxdiscoveries"}, obj.GetName(), nil)
+			}
+			return cl.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	})
+	r := &VoxDiscoveryReconciler{Client: c, Scheme: s}
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(disc)}); err != nil {
+		t.Fatalf("a conflict on the status write must be retried, got %v", err)
+	}
+	got := &openvoxv1alpha1.VoxDiscovery{}
+	if err := base.Get(ctx, client.ObjectKeyFromObject(disc), got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Status.Conditions) == 0 || got.Status.Conditions[0].Reason != "DatabaseDisabled" {
+		t.Errorf("expected DatabaseDisabled after the retry, got %+v", got.Status.Conditions)
 	}
 }

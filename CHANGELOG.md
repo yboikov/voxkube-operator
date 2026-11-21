@@ -8,6 +8,15 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.8]
+
+Fixes the security, correctness and performance findings of the architecture review of 0.2.7 (#27, #28, #29, #30,
+#34). Verified end to end on k3s with an external agent (72 checks).
+
+**Upgrade notes:** the CA, compilers and OpenVox DB roll once (new per-component certificates; the CA itself is
+unchanged). cert-manager certificates of VoxNodes whose name contains a dot are re-issued once under a new name.
+The CRDs now reject incomplete settings (see Added), so check `kubectl apply --dry-run=server` on your manifests.
+
 ### Security
 - The CA private key and the `pp_cli_auth` certificate (full CA admin rights) were mounted into every compiler and
   OpenVox DB pod via `<cluster>-ca-tls`. Compilers and OpenVox DB now get their own certificates without
@@ -58,6 +67,8 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 - VoxNode status, the HPA, VoxDiscovery's headless Service and EndpointSlices are written only when they change (#29).
 - The ENC ConfigMap and the Hiera Secret had two writers (VoxCluster and every VoxNode); the VoxCluster controller is
   now the only one. It renders them first, so node changes reach the compilers even while a later step fails (#29).
+- VoxDiscovery status writes outside the main sync path (invalid labels, missing cluster, database disabled, query
+  failure) didn't retry on conflicts, so a stale read logged a 409.
 - The mTLS HTTP client to the CA and OpenVox DB was rebuilt on every reconcile; it is now kept per VoxCluster and
   rebuilt only when the certificates change (#29).
 

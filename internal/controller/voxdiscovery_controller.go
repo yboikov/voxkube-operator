@@ -79,8 +79,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "InvalidLabels",
 			Message:            err.Error(),
 		})
-		_ = r.Status().Update(ctx, disc)
-		return ctrl.Result{}, nil
+		return ctrl.Result{}, r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status)
 	}
 
 	cluster := &openvoxv1alpha1.VoxCluster{}
@@ -93,8 +92,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 				Reason:             "ClusterNotFound",
 				Message:            fmt.Sprintf("VoxCluster %q not found", disc.Spec.ClusterRef),
 			})
-			_ = r.Status().Update(ctx, disc)
-			return ctrl.Result{}, nil
+			return ctrl.Result{}, r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status)
 		}
 		return ctrl.Result{}, err
 	}
@@ -116,7 +114,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "DatabaseDisabled",
 			Message:            fmt.Sprintf("VoxCluster %q has spec.database.enabled=false; nothing to discover", cluster.Name),
 		})
-		return ctrl.Result{}, r.Status().Update(ctx, disc)
+		return ctrl.Result{}, r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status)
 	}
 
 	// 1. Reconcile headless Service (ClusterIP: None)
@@ -178,8 +176,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			Reason:             "QueryFailed",
 			Message:            queryErr,
 		})
-		_ = r.Status().Update(ctx, disc)
-		return ctrl.Result{RequeueAfter: syncInterval}, nil
+		return ctrl.Result{RequeueAfter: syncInterval}, r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status)
 	}
 
 	// 3. Reconcile chunked EndpointSlices (<= 100 endpoints per slice, one set per IP family)
@@ -222,18 +219,28 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		Message:            discoverySyncedMessage(discoveredCount, sliceCount, skippedLabels),
 	})
 
-	desiredStatus := disc.Status
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &openvoxv1alpha1.VoxDiscovery{}
-		if err := r.Get(ctx, req.NamespacedName, latest); err != nil {
-			return err
-		}
-		latest.Status = desiredStatus
-		return r.Status().Update(ctx, latest)
-	}); err != nil {
+	if err := r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: syncInterval}, nil
+}
+
+// updateDiscoveryStatus writes desired as the status of the latest VoxDiscovery, retrying on conflicts (an
+// object read at the start of a reconcile can be stale by the time its status is written), and skips the write
+// when nothing changed.
+func (r *VoxDiscoveryReconciler) updateDiscoveryStatus(ctx context.Context, key types.NamespacedName,
+	desired openvoxv1alpha1.VoxDiscoveryStatus) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &openvoxv1alpha1.VoxDiscovery{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if statusJSONEqual(latest.Status, desired) {
+			return nil
+		}
+		latest.Status = desired
+		return r.Status().Update(ctx, latest)
+	})
 }
 
 func (r *VoxDiscoveryReconciler) reconcileHeadlessService(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) (string, error) {
