@@ -24,6 +24,19 @@ type DiscoveredPuppetNode struct {
 	Environment string                 `json:"environment"`
 	Deactivated *string                `json:"deactivated"`
 	Facts       map[string]interface{} `json:"facts"`
+	Trusted     map[string]interface{} `json:"trusted"`
+}
+
+// Fact resolves a dot-separated fact path. "trusted.*" paths fall back to the node's trusted data, which
+// PuppetDB's inventory returns separately from facts.
+func (n DiscoveredPuppetNode) Fact(path string) string {
+	if v := LookupFactString(n.Facts, path); v != "" {
+		return v
+	}
+	if rest, ok := strings.CutPrefix(path, "trusted."); ok {
+		return LookupFactString(n.Trusted, rest)
+	}
+	return ""
 }
 
 // PuppetDBNode is the subset of /pdb/query/v4/nodes/<certname> used for VoxNode status.
@@ -184,7 +197,7 @@ func BuildDiscoveryPQL(selector openvoxv1alpha1.DiscoverySelectorSpec) string {
 	if pql := strings.TrimSpace(selector.PQL); pql != "" {
 		conds = append(conds, "("+pql+")")
 	}
-	return "inventory[certname, environment, facts] { " + strings.Join(conds, " and ") + " }"
+	return "inventory[certname, environment, facts, trusted] { " + strings.Join(conds, " and ") + " }"
 }
 
 // QueryActiveNodes runs the selector's PQL query against GET /pdb/query/v4 and applies fact filters.
@@ -233,7 +246,7 @@ func matchesDiscoveryFacts(node DiscoveredPuppetNode, selector openvoxv1alpha1.D
 		return false
 	}
 	for k, expected := range selector.Facts {
-		if LookupFactString(node.Facts, k) != expected {
+		if node.Fact(k) != expected {
 			return false
 		}
 	}

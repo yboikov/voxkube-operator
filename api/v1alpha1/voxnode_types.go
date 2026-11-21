@@ -102,7 +102,7 @@ type CertManagerCertRequest struct {
 	// +optional
 	TargetKeyPath string `json:"targetKeyPath,omitempty"`
 
-	// SecretName overrides the generated Kubernetes TLS Secret name if already created externally.
+	// SecretName names the cert-manager Certificate and the TLS Secret it writes (default voxnode-cert-<voxnode>-<name>). The operator creates and owns that Certificate, so don't point this at a Secret something else manages.
 	// +optional
 	SecretName string `json:"secretName,omitempty"`
 }

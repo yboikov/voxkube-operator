@@ -75,6 +75,7 @@ RUN printf '%s\n' \
     ln -sf /opt/puppetlabs ${HOME}/.puppetlabs/opt && \
     ln -sf /var/log/puppetlabs ${HOME}/.puppetlabs/var/log && \
     ln -sf /var/run/puppetlabs ${HOME}/.puppetlabs/var/run && \
+    chgrp 0 /etc/passwd && chmod g=u /etc/passwd && \
     for d in /etc/puppetlabs /var/cache/puppetlabs /var/log/puppetlabs /var/run/puppetlabs /opt/puppetlabs; do \
         chgrp -R 0 "$d"; \
         chmod -R g=u "$d"; \

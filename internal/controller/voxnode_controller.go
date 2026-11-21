@@ -30,9 +30,13 @@ import (
 const (
 	// VoxNodeFinalizer ensures CA clean and PuppetDB node deactivation before a VoxNode is deleted.
 	VoxNodeFinalizer = "voxkube.io/node-cleanup"
+	// AnnotationSkipCleanup ("true") lets a VoxNode be deleted without cleaning the CA and OpenVox DB, e.g. when
+	// the CA is permanently lost. Without it the finalizer stays until the cleanup succeeds.
+	AnnotationSkipCleanup = "voxkube.io/skip-cleanup"
 
 	nodeRequeueWaiting = 30 * time.Second
 	nodeRequeueActive  = 5 * time.Minute
+	nodeRequeuePending = time.Minute
 )
 
 // VoxNodeReconciler reconciles a VoxNode object.
@@ -69,19 +73,10 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		clusterFound = false
 	}
 
-	// Deletion: clean CA + PuppetDB, then release the finalizer.
+	// Deletion: clean the CA and OpenVox DB, then release the finalizer. The finalizer stays until both
+	// succeed, unless the VoxCluster is gone (or going) or the skip-cleanup annotation is set.
 	if !node.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
-			if clusterFound {
-				r.decommissionNode(ctx, node, cluster)
-				_ = r.refreshClusterHieraAndENC(ctx, cluster)
-			}
-			controllerutil.RemoveFinalizer(node, VoxNodeFinalizer)
-			if err := r.Update(ctx, node); err != nil {
-				return ctrl.Result{}, err
-			}
-		}
-		return ctrl.Result{}, nil
+		return r.finalizeVoxNode(ctx, node, cluster, clusterFound)
 	}
 
 	if !controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
@@ -111,13 +106,26 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var result ctrl.Result
 	switch node.Spec.State {
 	case openvoxv1alpha1.NodeStateDecommissioned:
-		r.decommissionNode(ctx, node, cluster)
 		status.Phase = openvoxv1alpha1.NodePhaseDecommissioned
-		status.CACleaned = true
-		status.PuppetDBDeactivated = true
 		status.CertificateSigned = false
 		status.ReadyCertificates = 0
-		setReady(true, "NodeDecommissioned", "Certificate cleaned from the CA and node deactivated in OpenVox DB")
+		// A decommissioned machine has no current check-in, report or certificate.
+		status.LastSeenTime = nil
+		status.LastReportStatus = ""
+		status.CertificateFingerprint = ""
+		status.CertificateExtensions = nil
+		if !status.CACleaned || !status.PuppetDBDeactivated {
+			status.CACleaned, status.PuppetDBDeactivated = r.cleanupNode(ctx, node, cluster, status.CACleaned, status.PuppetDBDeactivated)
+		}
+		if err := r.deleteNodeCertificates(ctx, node, nil); err != nil {
+			return ctrl.Result{}, err
+		}
+		if status.CACleaned && status.PuppetDBDeactivated {
+			setReady(true, "NodeDecommissioned", "Certificate cleaned from the CA and node deactivated in OpenVox DB")
+		} else {
+			setReady(false, "CleanupPending", cleanupPendingMessage(status.CACleaned, status.PuppetDBDeactivated))
+			result = ctrl.Result{RequeueAfter: nodeRequeueWaiting}
+		}
 
 	case openvoxv1alpha1.NodeStateRevoked:
 		caURL := cluster.Status.CAURL
@@ -128,10 +136,12 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 		status.Phase = openvoxv1alpha1.NodePhaseRevoked
 		status.CertificateSigned = false
+		status.CACleaned, status.PuppetDBDeactivated = false, false
 		setReady(true, "CertificateRevoked", "Certificate revoked on the CA; compilers reject it once the CRL is synced")
 
 	case openvoxv1alpha1.NodeStatePendingApproval:
 		status.Phase = openvoxv1alpha1.NodePhasePendingCSR
+		status.CACleaned, status.PuppetDBDeactivated = false, false
 		msg := "Awaiting approval: set spec.state to Active to sign the CSR"
 		if cs, err := r.caStatus(ctx, cluster, node); err == nil && cs.State == "requested" {
 			msg = "CSR received; set spec.state to Active to sign it"
@@ -141,6 +151,8 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 		}
 		setReady(false, "PendingApproval", msg)
+		// Keep the CSR's extensions (pp_role) current while waiting for approval.
+		result = ctrl.Result{RequeueAfter: nodeRequeuePending}
 
 	default: // Active
 		var err error
@@ -150,16 +162,78 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}
 	}
 
-	if node.Spec.State != openvoxv1alpha1.NodeStateActive && node.Spec.State != "" {
-		if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
 	status.Role = effectiveRoleFor(node, status)
 	if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, *status); err != nil {
 		return ctrl.Result{}, err
 	}
+	// Render the ENC and Hiera after the status update: the ENC reads the role from status.
+	if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
+		return ctrl.Result{}, err
+	}
 	return result, nil
+}
+
+// finalizeVoxNode runs the deletion cleanup and releases the finalizer once it has succeeded.
+func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1alpha1.VoxNode,
+	cluster *openvoxv1alpha1.VoxCluster, clusterFound bool) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
+		return ctrl.Result{}, nil
+	}
+	logger := log.FromContext(ctx)
+	clusterLive := clusterFound && cluster.DeletionTimestamp.IsZero()
+	// Drop the node from the ENC and Hiera right away (nodeServedBy skips deleting VoxNodes), whatever the cleanup
+	// does: a machine being deleted must not keep getting catalogs or secrets.
+	if clusterLive {
+		if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+	switch {
+	case node.Annotations[AnnotationSkipCleanup] == "true":
+		logger.Info("skip-cleanup annotation set; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
+	case !clusterLive:
+		// Nothing left to clean against (or it is being torn down): don't block deletion forever.
+		logger.Info("VoxCluster gone; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
+	default:
+		status := node.Status.DeepCopy()
+		status.CACleaned, status.PuppetDBDeactivated = r.cleanupNode(ctx, node, cluster, status.CACleaned, status.PuppetDBDeactivated)
+		if !status.CACleaned || !status.PuppetDBDeactivated {
+			msg := cleanupPendingMessage(status.CACleaned, status.PuppetDBDeactivated) +
+				". Set the annotation " + AnnotationSkipCleanup + "=\"true\" to delete without cleanup"
+			meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+				Type: "Ready", Status: metav1.ConditionFalse, ObservedGeneration: node.Generation,
+				Reason: "CleanupPending", Message: msg,
+			})
+			if err := r.updateVoxNodeStatus(ctx, client.ObjectKeyFromObject(node), *status); err != nil && !apierrors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+			r.event(node, corev1.EventTypeWarning, "CleanupPending", msg)
+			return ctrl.Result{RequeueAfter: nodeRequeueWaiting}, nil
+		}
+	}
+	controllerutil.RemoveFinalizer(node, VoxNodeFinalizer)
+	if err := r.Update(ctx, node); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func cleanupPendingMessage(caCleaned, dbDeactivated bool) string {
+	var pending []string
+	if !caCleaned {
+		pending = append(pending, "cleaning the certificate on the CA")
+	}
+	if !dbDeactivated {
+		pending = append(pending, "deactivating the node in OpenVox DB")
+	}
+	return "Retrying " + strings.Join(pending, " and ") + " (see the operator log)"
+}
+
+// nodeServedBy reports whether cluster classifies n and renders its Hiera data: n belongs to cluster, has a
+// certname, isn't being deleted and is neither Decommissioned nor Revoked.
+func nodeServedBy(n *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) bool {
+	return n.Spec.ClusterRef == cluster.Name && n.Spec.Certname != "" && n.DeletionTimestamp.IsZero() &&
+		n.Spec.State != openvoxv1alpha1.NodeStateDecommissioned && n.Spec.State != openvoxv1alpha1.NodeStateRevoked
 }
 
 // effectiveRoleFor is EffectiveRole evaluated against the status being written.
@@ -279,12 +353,8 @@ func (r *VoxNodeReconciler) reconcileActive(
 	status.CACleaned = false
 	status.PuppetDBDeactivated = false
 
-	if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Last check-in and report status from OpenVox DB.
-	seen := false
+	seen, deactivated := false, false
 	var dbErr error
 	if dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster); dbClient != nil && cluster.Status.DatabaseURL != "" {
 		pn, err := dbClient.GetNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname)
@@ -296,6 +366,13 @@ func (r *VoxNodeReconciler) reconcileActive(
 				seen = true
 			}
 			status.LastReportStatus = pn.LatestReportStatus
+			// OpenVox DB keeps deactivated and expired nodes around; they are not checking in. Keep the last
+			// check-in (so "not reporting" alerts keep firing for a machine that aged out), but not its report
+			// status: when a certname is reused, the old machine's failed run must not show up as the new one's.
+			deactivated = pn.Deactivated != nil || pn.Expired != nil
+			if deactivated {
+				status.LastReportStatus = ""
+			}
 		case !errors.Is(err, ErrNodeNotFound):
 			// Keep the last known check-in: an OpenVox DB outage must not demote an Active node.
 			dbErr = err
@@ -312,6 +389,10 @@ func (r *VoxNodeReconciler) reconcileActive(
 			status.Phase = openvoxv1alpha1.NodePhaseSigned
 		}
 		setReady(false, waitingReason, waitingMsg)
+	case deactivated:
+		status.Phase = openvoxv1alpha1.NodePhaseSigned
+		setReady(false, "NodeDeactivated",
+			"The node is deactivated or expired in OpenVox DB; its next Puppet run reactivates it")
 	case !seen && dbErr != nil:
 		status.Phase = openvoxv1alpha1.NodePhaseSigned
 		setReady(true, "DatabaseUnreachable", "Certificate signed, but OpenVox DB can't be queried: "+dbErr.Error())
@@ -352,31 +433,81 @@ func (r *VoxNodeReconciler) updateVoxNodeStatus(ctx context.Context, key types.N
 	})
 }
 
-// decommissionNode cleans the certificate on the CA, deactivates the node in OpenVox DB and deletes its
-// cert-manager Certificates. CA/DB failures are logged and do not block local cleanup.
-func (r *VoxNodeReconciler) decommissionNode(ctx context.Context, node *openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.VoxCluster) {
+// cleanupNode cleans the certificate on the CA and deactivates the node in OpenVox DB, skipping the steps
+// already done. It reports which steps are done; failures are logged and retried by the caller.
+// A cluster without its own CA or OpenVox DB has nothing to clean there.
+func (r *VoxNodeReconciler) cleanupNode(ctx context.Context, node *openvoxv1alpha1.VoxNode,
+	cluster *openvoxv1alpha1.VoxCluster, caCleaned, dbDeactivated bool) (bool, bool) {
 	logger := log.FromContext(ctx)
-	if caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster); caClient != nil && cluster.Status.CAURL != "" {
-		if err := caClient.CleanNode(ctx, cluster.Status.CAURL, node.Spec.Certname); err != nil {
-			logger.Info("CA not reachable during decommission; proceeding", "certname", node.Spec.Certname, "reason", err.Error())
+	if !caCleaned {
+		caClient := resolveCAClient(ctx, r.Client, r.CAClient, cluster)
+		switch {
+		case !caEnabled(cluster) || caClient == nil:
+			caCleaned = true
+		case cluster.Status.CAURL == "":
+			logger.Info("CA not up yet; will retry the certificate clean", "certname", node.Spec.Certname)
+		default:
+			if err := caClient.CleanNode(ctx, cluster.Status.CAURL, node.Spec.Certname); err != nil {
+				logger.Info("CA clean failed; will retry", "certname", node.Spec.Certname, "reason", err.Error())
+			} else {
+				caCleaned = true
+				r.event(node, corev1.EventTypeNormal, "CertificateCleaned", "Cleaned "+node.Spec.Certname+" on the CA")
+			}
 		}
 	}
-	if dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster); dbClient != nil && cluster.Status.DatabaseURL != "" {
-		if err := dbClient.DeactivateNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname); err != nil {
-			logger.Info("OpenVox DB not reachable during decommission; proceeding", "certname", node.Spec.Certname, "reason", err.Error())
+	if !dbDeactivated {
+		dbClient := resolveDBClient(ctx, r.Client, r.DBClient, cluster)
+		switch {
+		case !databaseEnabled(cluster) || dbClient == nil:
+			dbDeactivated = true
+		case cluster.Status.DatabaseURL == "":
+			logger.Info("OpenVox DB not up yet; will retry the deactivation", "certname", node.Spec.Certname)
+		default:
+			if err := dbClient.DeactivateNode(ctx, cluster.Status.DatabaseURL, node.Spec.Certname); err != nil {
+				logger.Info("OpenVox DB deactivation failed; will retry", "certname", node.Spec.Certname, "reason", err.Error())
+			} else {
+				dbDeactivated = true
+				r.event(node, corev1.EventTypeNormal, "NodeDeactivated", "Deactivated "+node.Spec.Certname+" in OpenVox DB")
+			}
 		}
 	}
-	for _, certReq := range node.Spec.Certificates {
-		certObj := &unstructured.Unstructured{}
-		certObj.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
-		certObj.SetNamespace(node.Namespace)
-		certObj.SetName(CertManagerSecretName(node, certReq))
-		_ = r.Delete(ctx, certObj)
+	return caCleaned, dbDeactivated
+}
+
+// deleteNodeCertificates deletes the cert-manager Certificates controlled by node whose name is not in keep
+// (nil keep deletes all of them). Certificates someone else created under the same name are left alone.
+func (r *VoxNodeReconciler) deleteNodeCertificates(ctx context.Context, node *openvoxv1alpha1.VoxNode, keep map[string]bool) error {
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "CertificateList"})
+	if err := r.List(ctx, list, client.InNamespace(node.Namespace),
+		client.MatchingLabels{"voxkube.io/node": sanitizeLabelValue(node.Spec.Certname)}); err != nil {
+		if isNoMatch(err, "Certificate") || isNoMatch(err, "CertificateList") {
+			return nil
+		}
+		return err
 	}
+	for i := range list.Items {
+		c := &list.Items[i]
+		if keep[c.GetName()] || !metav1.IsControlledBy(c, node) {
+			continue
+		}
+		if err := r.Delete(ctx, c); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *VoxNodeReconciler) reconcileCertManagerCertificates(ctx context.Context, node *openvoxv1alpha1.VoxNode) (int32, error) {
 	var readyCount int32
+	wanted := map[string]bool{}
+	for _, req := range node.Spec.Certificates {
+		wanted[CertManagerSecretName(node, req)] = true
+	}
+	// Drop Certificates whose entry was removed from spec.certificates.
+	if err := r.deleteNodeCertificates(ctx, node, wanted); err != nil {
+		return 0, err
+	}
 	for _, req := range node.Spec.Certificates {
 		secName := CertManagerSecretName(node, req)
 		issuerKind := firstNonEmpty(req.IssuerRef.Kind, "ClusterIssuer")
@@ -426,13 +557,18 @@ func (r *VoxNodeReconciler) reconcileCertManagerCertificates(ctx context.Context
 		err := r.Get(ctx, types.NamespacedName{Namespace: node.Namespace, Name: secName}, existing)
 		switch {
 		case apierrors.IsNotFound(err):
+			stampAppliedHash(certObj)
 			if createErr := r.Create(ctx, certObj); createErr != nil && !isNoMatch(createErr, "Certificate") {
 				return readyCount, createErr
 			}
+		case err == nil && !metav1.IsControlledBy(existing, node):
+			return readyCount, fmt.Errorf("certificate %q: a cert-manager Certificate %s already exists and is not owned by this VoxNode; choose another secretName",
+				req.Name, secName)
 		case err == nil:
-			certObj.SetResourceVersion(existing.GetResourceVersion())
-			if err := r.Update(ctx, certObj); err != nil {
-				return readyCount, err
+			if prepareUnstructuredUpdate(existing, certObj) {
+				if err := r.Update(ctx, certObj); err != nil {
+					return readyCount, err
+				}
 			}
 		case !isNoMatch(err, "Certificate"):
 			return readyCount, err

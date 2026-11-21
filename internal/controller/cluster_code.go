@@ -68,6 +68,12 @@ if [ -s "$AUTH/token" ] || [ -s "$AUTH/password" ]; then
 fi
 
 if [ -s "$SSHDIR/ssh-privatekey" ]; then
+  # OpenSSH refuses to run when the current UID has no passwd entry, which
+  # is the norm under OpenShift's random UIDs. The image makes /etc/passwd
+  # writable for group 0, so register the UID on the fly.
+  if ! id -un >/dev/null 2>&1 && [ -w /etc/passwd ]; then
+    echo "voxkube:x:$(id -u):0:voxkube:${HOME}:/sbin/nologin" >> /etc/passwd
+  fi
   mkdir -p /tmp/g10k-ssh
   chmod 700 /tmp/g10k-ssh
   cp "$SSHDIR/ssh-privatekey" /tmp/g10k-ssh/id
@@ -238,7 +244,7 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	poll := 60 * time.Second
 	if g.PollInterval != "" {
 		if d, err := time.ParseDuration(g.PollInterval); err == nil && d > 0 {
-			poll = d
+			poll = max(d, minPollInterval)
 		}
 	}
 	plan := &codePlan{
@@ -251,6 +257,7 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	// 1. Credentials.
 	var pollAuth *GitAuth
 	authSecret := ""
+	authFailed := false
 	sshSecret := ""
 	authType := g.AuthType
 	if authType == "githubApp" && g.GitHubApp == nil {
@@ -259,10 +266,12 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	switch authType {
 	case "githubApp":
 		token, secName, err := r.reconcileGitHubAppToken(ctx, cluster)
+		// Keep the token Secret mounted even when the refresh failed (see reconcileGitHubAppToken).
+		authSecret = secName
 		if err != nil {
+			authFailed = true
 			plan.ready, plan.reason, plan.message = false, codeReasonAuthFail, "GitHub App token: "+err.Error()
 		} else {
-			authSecret = secName
 			pollAuth = &GitAuth{Username: "x-access-token", Password: token}
 		}
 	case "httpsToken":
@@ -368,8 +377,8 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 			plan.reason = codeReasonGitSide
 			plan.message += fmt.Sprintf("Each compiler deploys %s every %s", g.Remote, poll)
 		}
-		// Still report HEAD for visibility when the remote can be polled.
-		if r.GitPoller != nil && IsHTTPRemote(g.Remote) {
+		// Still report HEAD for visibility when the remote can be polled, but never without the credentials.
+		if r.GitPoller != nil && IsHTTPRemote(g.Remote) && !authFailed {
 			if rev, err := r.GitPoller.Resolve(ctx, g.Remote, pollAuth); err == nil {
 				plan.observedCommit = rev.Head
 			}
@@ -381,6 +390,16 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 	prevRevision, prevCommit := r.currentCodeRevision(ctx, cluster)
 	if r.GitPoller == nil {
 		plan.podAnnotations[AnnotationCodeRevision] = prevRevision
+		return plan, nil
+	}
+	if authFailed {
+		// Don't poll without credentials (it would fail and hide the real reason); keep the current revision.
+		if prevRevision != "" {
+			plan.podAnnotations[AnnotationCodeRevision] = prevRevision
+		}
+		if prevCommit != "" {
+			plan.podAnnotations[AnnotationObservedCommit] = prevCommit
+		}
 		return plan, nil
 	}
 	rev, err := r.GitPoller.Resolve(ctx, g.Remote, pollAuth)
@@ -396,7 +415,9 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 		return plan, nil
 	}
 	plan.observedCommit = rev.Head
-	plan.podAnnotations[AnnotationCodeRevision] = rev.RefsHash
+	// A new voxkube.io/sync-now value also rolls the compilers, so a full redeploy (e.g. for Puppetfile modules that
+	// track a branch, which don't move the control repo) can be forced without a commit.
+	plan.podAnnotations[AnnotationCodeRevision] = codeRevision(rev.RefsHash, cluster.Annotations[AnnotationSyncNow])
 	plan.podAnnotations[AnnotationObservedCommit] = rev.Head
 	if plan.ready {
 		plan.reason = codeReasonGit
@@ -413,6 +434,14 @@ func shortSHA(s string) string {
 }
 
 // currentCodeRevision reads the code revision currently rolled out on the compiler Deployment.
+// codeRevision is the pod-template value that rolls the compilers: the branch heads, plus the sync-now value if set.
+func codeRevision(refsHash, syncNow string) string {
+	if syncNow == "" {
+		return refsHash
+	}
+	return refsHash + "/" + syncNow
+}
+
 func (r *VoxClusterReconciler) currentCodeRevision(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (string, string) {
 	d := &appsv1.Deployment{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: cluster.Name + "-server"}, d); err != nil {
@@ -421,6 +450,10 @@ func (r *VoxClusterReconciler) currentCodeRevision(ctx context.Context, cluster 
 	a := d.Spec.Template.Annotations
 	return a[AnnotationCodeRevision], a[AnnotationObservedCommit]
 }
+
+// minPollInterval bounds spec.code.git.pollInterval: shorter values would hammer the Git host (and sub-second values
+// made the sidecar's "sleep" spin).
+const minPollInterval = 10 * time.Second
 
 // reconcileGitHubAppToken returns a valid installation token, minting a new one only when the cached token in
 // <cluster>-g10k-git-token expires within 10 minutes.
@@ -439,21 +472,30 @@ func (r *VoxClusterReconciler) reconcileGitHubAppToken(ctx context.Context, clus
 			return string(existing.Data["token"]), secName, nil
 		}
 	}
+	// A failed refresh still returns the cached token Secret (and its token, which is usually still valid for a few
+	// minutes): dropping it would remove the credentials from the compiler pod template and roll the compilers into
+	// pods that can't fetch code.
+	fail := func(err error) (string, string, error) {
+		if found {
+			return string(existing.Data["token"]), secName, err
+		}
+		return "", "", err
+	}
 
 	if r.TokenExchanger == nil {
-		return "", "", fmt.Errorf("no GitHub App token exchanger configured")
+		return fail(fmt.Errorf("no GitHub App token exchanger configured"))
 	}
 	keySec := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: app.PrivateKeySecretRef.Name}, keySec); err != nil {
-		return "", "", fmt.Errorf("reading GitHub App private key Secret %q: %w", app.PrivateKeySecretRef.Name, err)
+		return fail(fmt.Errorf("reading GitHub App private key Secret %q: %w", app.PrivateKeySecretRef.Name, err))
 	}
 	pemBytes := keySec.Data[app.PrivateKeySecretRef.Key]
 	if len(pemBytes) == 0 {
-		return "", "", fmt.Errorf("secret %q has no key %q", app.PrivateKeySecretRef.Name, app.PrivateKeySecretRef.Key)
+		return fail(fmt.Errorf("secret %q has no key %q", app.PrivateKeySecretRef.Name, app.PrivateKeySecretRef.Key))
 	}
 	token, expiresAt, err := r.TokenExchanger.ExchangeInstallationToken(ctx, app.APIBaseURL, app.AppID, app.InstallationID, pemBytes)
 	if err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(time.Hour)
@@ -470,13 +512,14 @@ func (r *VoxClusterReconciler) reconcileGitHubAppToken(ctx context.Context, clus
 		Data: map[string][]byte{"token": []byte(token), "username": []byte("x-access-token")},
 	}
 	if err := controllerutil.SetControllerReference(cluster, tokenSec, r.Scheme); err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	if !found {
 		if err := r.Create(ctx, tokenSec); err != nil && !apierrors.IsAlreadyExists(err) {
-			return "", "", err
+			return fail(err)
 		}
 	} else {
+		// A failed write (e.g. a 409 conflict) must not unmount the Secret: fail() keeps it, retried next reconcile.
 		existing.Data = tokenSec.Data
 		if existing.Annotations == nil {
 			existing.Annotations = map[string]string{}
@@ -484,7 +527,7 @@ func (r *VoxClusterReconciler) reconcileGitHubAppToken(ctx context.Context, clus
 		existing.Annotations[tokenExpiryAnno] = tokenSec.Annotations[tokenExpiryAnno]
 		existing.Labels = tokenSec.Labels
 		if err := r.Update(ctx, existing); err != nil {
-			return "", "", err
+			return fail(err)
 		}
 	}
 	return token, secName, nil

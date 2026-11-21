@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -25,8 +27,38 @@ var nodeMetricHelp = map[string]string{
 	metricNodeLastSeen:         "Unix time of an Active node's latest report, facts or catalog in OpenVox DB. Absent until the first check-in.",
 }
 
-// nodeMetricFixedLabels are on every node metric. VoxNode labels monitoring.voxkube.io/<label> are added after them.
+// nodeMetricFixedLabels are on every node metric. The allowlisted VoxNode labels monitoring.voxkube.io/<label>
+// (--node-metric-labels) are added after them.
 var nodeMetricFixedLabels = []string{"namespace", "voxnode", "certname", "cluster", "role", "state"}
+
+// DefaultNodeMetricLabels is the default --node-metric-labels.
+const DefaultNodeMetricLabels = "alerts"
+
+// ParseNodeMetricLabels validates a comma-separated list of monitoring label names for the node metrics.
+// Each must be a valid label name that is neither reserved by Prometheus nor one of the fixed labels.
+func ParseNodeMetricLabels(csv string) ([]string, error) {
+	fixed := map[string]bool{}
+	for _, l := range nodeMetricFixedLabels {
+		fixed[l] = true
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range strings.Split(csv, ",") {
+		name = strings.TrimSpace(name)
+		switch {
+		case name == "" || seen[name]:
+			continue
+		case !endpointLabelName.MatchString(name) || len(name) > 63:
+			return nil, fmt.Errorf("node metric label %q: use letters, digits and _, starting with a letter and ending with a letter or digit", name)
+		case reservedTargetLabels[name] || fixed[name]:
+			return nil, fmt.Errorf("node metric label %q is reserved", name)
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 type nodeSample struct {
 	metric string
@@ -34,30 +66,28 @@ type nodeSample struct {
 	value  float64
 }
 
-// nodeMetricSamples turns VoxNodes into samples. Monitoring labels that are not valid Prometheus label names, are
-// reserved, or collide with the fixed labels are left out.
-func nodeMetricSamples(nodes []openvoxv1alpha1.VoxNode) []nodeSample {
-	fixed := map[string]bool{}
-	for _, l := range nodeMetricFixedLabels {
-		fixed[l] = true
-	}
+// nodeMetricSamples turns VoxNodes into samples carrying the fixed labels plus the allowlisted monitoring labels.
+func nodeMetricSamples(nodes []openvoxv1alpha1.VoxNode, extraLabels []string) []nodeSample {
 	var out []nodeSample
 	for i := range nodes {
 		n := &nodes[i]
+		state := n.Spec.State
+		if state == "" {
+			state = openvoxv1alpha1.NodeStateActive // the API default
+		}
 		labels := map[string]string{
 			"namespace": n.Namespace,
 			"voxnode":   n.Name,
 			"certname":  n.Spec.Certname,
 			"cluster":   n.Spec.ClusterRef,
 			"role":      n.Status.Role,
-			"state":     string(n.Spec.State),
+			"state":     string(state),
 		}
-		for name, v := range voxNodeMonitoringLabels(n.Labels) {
-			if endpointLabelName.MatchString(name) && !reservedTargetLabels[name] && !fixed[name] {
-				labels[name] = v
-			}
+		monitoring := voxNodeMonitoringLabels(n.Labels)
+		for _, name := range extraLabels {
+			labels[name] = monitoring[name]
 		}
-		active := n.Spec.State == openvoxv1alpha1.NodeStateActive
+		active := state == openvoxv1alpha1.NodeStateActive
 		out = append(out, nodeSample{metricNodeActive, labels, boolFloat(active)})
 		if !active {
 			continue
@@ -79,11 +109,14 @@ func boolFloat(b bool) float64 {
 	return 0
 }
 
-// NodeMetricsCollector exports nodeMetricSamples on every scrape. It is an unchecked collector (Describe sends
-// nothing) because the label names depend on the VoxNodes' monitoring labels; within one scrape every metric
-// family gets the same label names (the union, empty where a node lacks one), as Prometheus requires.
+// NodeMetricsCollector exports nodeMetricSamples on every scrape. The label names are fixed for the life of the
+// process: the fixed labels plus Labels (from --node-metric-labels), empty where a node lacks one. Adding a
+// monitoring label to one VoxNode therefore never changes the identity of every other series.
+// It is an unchecked collector (Describe sends nothing); Collect builds const metrics from the cache.
 type NodeMetricsCollector struct {
 	Reader client.Reader
+	// Labels are the monitoring.voxkube.io/<label> VoxNode labels exported on every series.
+	Labels []string
 }
 
 // Describe implements prometheus.Collector.
@@ -99,28 +132,13 @@ func (c *NodeMetricsCollector) Collect(ch chan<- prometheus.Metric) {
 		log.Log.V(1).Info("VoxNode metrics skipped", "reason", err.Error())
 		return
 	}
-	for _, m := range buildNodeMetrics(nodeMetricSamples(list.Items)) {
+	for _, m := range buildNodeMetrics(nodeMetricSamples(list.Items, c.Labels), c.Labels) {
 		ch <- m
 	}
 }
 
-func buildNodeMetrics(samples []nodeSample) []prometheus.Metric {
-	extra := map[string]bool{}
-	for _, s := range samples {
-		for k := range s.labels {
-			extra[k] = true
-		}
-	}
-	for _, l := range nodeMetricFixedLabels {
-		delete(extra, l)
-	}
-	names := append([]string{}, nodeMetricFixedLabels...)
-	extraNames := make([]string, 0, len(extra))
-	for k := range extra {
-		extraNames = append(extraNames, k)
-	}
-	sort.Strings(extraNames)
-	names = append(names, extraNames...)
+func buildNodeMetrics(samples []nodeSample, extraLabels []string) []prometheus.Metric {
+	names := append(append([]string{}, nodeMetricFixedLabels...), extraLabels...)
 
 	descs := map[string]*prometheus.Desc{}
 	var out []prometheus.Metric

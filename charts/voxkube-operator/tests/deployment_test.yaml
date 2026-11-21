@@ -38,3 +38,18 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].args
           content: --watch-namespace=openvox
+
+  - it: should pass the node metric label allowlist
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --node-metric-labels=alerts
+
+  - it: should join several node metric labels
+    set:
+      metrics:
+        nodeLabels: [alerts, team]
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --node-metric-labels=alerts,team

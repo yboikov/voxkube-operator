@@ -118,8 +118,10 @@ spec:
                         should renew the certificate.
                       type: string
                     secretName:
-                      description: SecretName overrides the generated Kubernetes TLS
-                        Secret name if already created externally.
+                      description: SecretName names the cert-manager Certificate and
+                        the TLS Secret it writes (default voxnode-cert-<voxnode>-<name>).
+                        The operator creates and owns that Certificate, so don't point
+                        this at a Secret something else manages.
                       type: string
                     targetCertPath:
                       description: TargetCertPath is an optional file path on the

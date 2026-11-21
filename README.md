@@ -57,9 +57,9 @@ sequenceDiagram
 
     VM->>CA: 1. certificate request
     Op->>You: 2. VoxNode web01 appears as PendingApproval (or you add it to Git first)
-    You->>Op: 3. state: Active, role: role::webserver
+    You->>Op: 3. state: Active, role: webserver
     Op->>CA: 4. sign
-    VM->>SRV: 5. puppet agent -t: catalog for role::webserver
+    VM->>SRV: 5. puppet agent -t: catalog for role webserver
     SRV->>DB: 6. facts and report
     Op->>DB: 7. VoxDiscovery query
     Op->>P: 8. web01 becomes a scrape target
@@ -96,7 +96,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.2.6 \
+  --version 0.2.7 \
   --namespace openvox \
   --create-namespace
 ```
@@ -180,7 +180,7 @@ With `code.mode: pvc` and no `claimName`, the compilers serve a small demo `prod
      state: Active
      classification:
        environment: production
-       role: role::webserver
+       role: webserver   # the top-scope $role; your site.pp maps it to a class (e.g. include "role::${role}")
        classes:
          - profile::nginx
        parameters:
@@ -219,11 +219,13 @@ spec:
       generateTypes: true
 ```
 
-To trigger an immediate Git poll without waiting for `pollInterval`:
+To trigger an immediate Git poll without waiting for `pollInterval` (the minimum is `10s`):
 
 ```bash
 kubectl annotate voxcluster production -n openvox voxkube.io/sync-now="$(date +%s)" --overwrite
 ```
+
+In synchronized mode a new `sync-now` value also rolls the compilers, so it doubles as "redeploy the code now" even when no branch moved.
 
 ---
 
@@ -232,7 +234,7 @@ kubectl annotate voxcluster production -n openvox voxkube.io/sync-now="$(date +%
 VoxKube includes a built-in Hiera Secret Bridge that mounts Kubernetes Secrets into `/etc/puppetlabs/puppet/hiera-secrets` and automatically adds `lookup_options` with `convert_to: "Sensitive"` so secrets never leak in Puppet logs or reports:
 
 - **Common Secrets**: List secret names under `spec.hieraSecrets.commonSecrets` on `VoxCluster`, or label any Secret (for example from External Secrets Operator) with `voxkube.io/hiera-secret: "true"`.
-- **Role Secrets**: Label a Secret with `voxkube.io/hiera-secret: "true"`, `voxkube.io/hiera-scope: "role"`, and `voxkube.io/hiera-role: "webserver"`.
+- **Role Secrets**: Label a Secret with `voxkube.io/hiera-secret: "true"`, `voxkube.io/hiera-scope: "role"`, and `voxkube.io/hiera-role: "webserver"`. The role is a label value, so roles you scope secrets to must be valid label values (letters, digits, `-`, `_`, `.`, at most 63 characters): use `webserver`, not `role::webserver`.
 - **Per-Node SSL Certificates via `cert-manager`**: Request one or more certificates directly on a `VoxNode`:
   ```yaml
   spec:
@@ -258,10 +260,18 @@ When a VM is retired, either set `spec.state: Decommissioned` or delete the `Vox
 kubectl delete voxnode web-01 -n openvox
 ```
 
-VoxKube's finalizer atomically:
+VoxKube then:
 1. Revokes and cleans the node's certificate on `<cluster>-ca` (`PUT /puppet-ca/v1/clean`).
 2. Deactivates the node in OpenVox DB (`POST /pdb/cmd/v1` `deactivate node`).
 3. Removes its ENC and Hiera entries from `<cluster>-server`.
+
+Each step is retried until it succeeds; a deleted `VoxNode` stays (`Ready=False`, reason `CleanupPending`) until both the CA and OpenVox DB steps went through. If the CA is gone for good, let the deletion finish without cleanup:
+
+```bash
+kubectl annotate voxnode web-01 -n openvox voxkube.io/skip-cleanup=true
+```
+
+Deleting the whole `VoxCluster` (or its namespace) never blocks on `VoxNode` cleanup.
 
 ---
 
@@ -398,7 +408,7 @@ spec:
             summary: "{{ $labels.certname }} hasn't reported to Puppet for {{ $value | humanizeDuration }}"
 ```
 
-`alerts!="false"` skips machines muted with the VoxNode label `monitoring.voxkube.io/alerts=false`; every `monitoring.voxkube.io/<label>` is available as `<label>` for routing too.
+`alerts!="false"` skips machines muted with the VoxNode label `monitoring.voxkube.io/alerts=false`. Other `monitoring.voxkube.io/<label>` labels can be used for routing too once you add them to `metrics.nodeLabels` (operator flag `--node-metric-labels`).
 ---
 
 ## API Reference (`#api-reference`)
@@ -460,11 +470,11 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `authType` | string | `githubApp` | `githubApp` \| `sshKey` \| `httpsToken` \| `none` | `githubApp` without a `githubApp` block is treated as `none`. |
 | `githubApp` | [`GitHubAppAuthSpec`](#voxclusterspeccodegitgithubapp) | – | – | For `authType: githubApp`. |
 | `credentialsSecretRef` | string | – | – | `sshKey`: Secret with `ssh-privatekey` and optionally `known_hosts` (without it, host keys are accepted on first use). `httpsToken`: Secret with `token` (plus optional `username`, default `x-access-token`) or with `username` + `password`. |
-| `pollInterval` | duration | `60s` | Go duration | How often the operator (synchronized mode) or each sidecar (sidecar mode) checks the remote for moved branches. |
+| `pollInterval` | duration | `60s` | Go duration, minimum `10s` (shorter values are raised to it) | How often the operator (synchronized mode) or each sidecar (sidecar mode) checks the remote for moved branches. |
 | `synchronizedRollout` | bool | `true` | – | `true`: the operator polls `info/refs` (HTTP(S) remotes only) and rolls all compilers whenever **any branch** moves, so every pod serves the same revision. `false`, or any SSH remote: every compiler runs a `g10k-sync` sidecar that checks the branches (`git ls-remote --heads`) every `pollInterval` and redeploys only when one moved, plus once an hour to pick up Puppetfile modules that track a branch. Each pod does this independently. |
 | `generateTypes` | bool | `true` | – | Runs `puppet generate types` for every environment after each g10k deployment. |
 
-How it's wired: ConfigMap `<cluster>-g10k` holds `g10k.yaml`, `deploy.sh`, `sidecar.sh` and `askpass.sh`. Compilers get a `g10k-init` init container, plus a `g10k-sync` sidecar in sidecar mode. HTTPS credentials reach git through `GIT_ASKPASS` and never appear in URLs. SSH keys are copied to a private temp file and used via `GIT_SSH_COMMAND`. `deploy.sh` fails (without touching the deployed code) when the remote can't be reached or has no branches, and when g10k leaves `environments/` empty; in that last case it also deletes the g10k cache so the next attempt clones fresh. A failing `g10k-init` is retried by the kubelet, so a compiler only starts with code; a failing sidecar run is retried on the next poll.
+How it's wired: ConfigMap `<cluster>-g10k` holds `g10k.yaml`, `deploy.sh`, `sidecar.sh` and `askpass.sh`. Compilers get a `g10k-init` init container, plus a `g10k-sync` sidecar in sidecar mode. HTTPS credentials reach git through `GIT_ASKPASS` and never appear in URLs. SSH keys are copied to a private temp file and used via `GIT_SSH_COMMAND`; under OpenShift's random UIDs the script first adds a `/etc/passwd` entry for the UID (the image makes the file group-writable), since OpenSSH refuses to run without one. `deploy.sh` fails (without touching the deployed code) when the remote can't be reached or has no branches, and when g10k leaves `environments/` empty; in that last case it also deletes the g10k cache so the next attempt clones fresh. A failing `g10k-init` is retried by the kubelet, so a compiler only starts with code; a failing sidecar run is retried on the next poll.
 
 #### `VoxCluster.spec.code.git.githubApp`
 
@@ -475,7 +485,7 @@ How it's wired: ConfigMap `<cluster>-g10k` holds `g10k.yaml`, `deploy.sh`, `side
 | `privateKeySecretRef` | `SecretKeySelector` (`name`, `key`) | – | **required** | The App's RSA private key in PEM format. |
 | `apiBaseURL` | string | `https://api.github.com` | – | Override for GitHub Enterprise Server. |
 
-The operator mints an installation token (`POST {apiBaseURL}/app/installations/{id}/access_tokens`) and caches it in Secret `<cluster>-g10k-git-token` (keys `token` and `username`, annotation `voxkube.io/expires-at`). It mints a new one only when the cached token expires within 10 minutes. The Secret is mounted into the g10k containers.
+The operator mints an installation token (`POST {apiBaseURL}/app/installations/{id}/access_tokens`) and caches it in Secret `<cluster>-g10k-git-token` (keys `token` and `username`, annotation `voxkube.io/expires-at`). It mints a new one only when the cached token expires within 10 minutes. The Secret is mounted into the g10k containers. When minting fails (GitHub unreachable, App uninstalled, bad key), `CodeReady` turns `False` with reason `GitAuthFailed`, the last cached token stays mounted, and in synchronized mode the compilers keep their current revision: the operator never falls back to polling the repository unauthenticated.
 
 #### `VoxCluster.spec.ca`
 
@@ -644,9 +654,9 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `nodeClassification.mode` | string | `voxnode` | `voxnode` \| `externalHttp` \| `none` | `voxnode`: classification comes from `VoxNode` resources. `externalHttp`: the `VoxNode` classification if there is one, otherwise `GET <externalURL>/<certname>` (must return ENC YAML), otherwise the default. `none`: no ENC (`node_terminus` isn't set). |
+| `nodeClassification.mode` | string | `voxnode` | `voxnode` \| `externalHttp` \| `none` | `voxnode`: classification comes from `VoxNode` resources. `externalHttp`: the `VoxNode` classification if there is one, otherwise `GET <externalURL>/<certname>`: HTTP 200 must return ENC YAML, 404 falls back to the default, and any other status, a timeout (10 s) or a connection error fails the catalog request (the agent run fails instead of silently getting the default classification). `none`: no ENC (`node_terminus` isn't set). |
 | `nodeClassification.defaultEnvironment` | string | `production` | – | Environment for nodes without a `VoxNode`, and for `VoxNode`s with an empty `classification.environment`. |
-| `nodeClassification.autoCreateVoxNode` | bool | `true` | – | Creates a `VoxNode` (label `voxkube.io/auto-created: "true"`) for every certname the CA knows that has none: pending CSRs get `state: PendingApproval`, signed certificates get `state: Active`. Revoked certificates and the cluster's own certificate are skipped. |
+| `nodeClassification.autoCreateVoxNode` | bool | `true` | – | Creates a `VoxNode` (label `voxkube.io/auto-created: "true"`) for every certname the CA knows that has none in this cluster (`VoxNode`s of another `VoxCluster` in the namespace don't count): pending CSRs get `state: PendingApproval`, signed certificates get `state: Active`. Revoked certificates and the cluster's own certificate are skipped. |
 | `nodeClassification.externalURL` | string | – | – | Base URL for `externalHttp`. |
 | `facts.injectKubernetesMetadata` | bool | `true` | – | Adds top-scope ENC parameters `voxkube_cluster`, `voxkube_namespace` and `voxkube_node` (the `VoxNode` name; absent for nodes without one). |
 | `reports.processors` | []string | `[puppetdb]` (or `[store]` without a database) | – | puppet.conf `reports`. |
@@ -673,25 +683,27 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 
 All of these are labelled `app.kubernetes.io/name=voxkube`, `app.kubernetes.io/instance=<c>`, `app.kubernetes.io/component=<component>` and `app.kubernetes.io/managed-by=voxkube-operator`. They are owned by the `VoxCluster` (garbage-collected with it) **except the CA Secret and the CA PVC**.
 
+Switching a component off deletes its objects (only those the `VoxCluster` controls): `database.enabled: false` removes `<c>-db*` and the built-in PostgreSQL, `postgres.mode: external` removes the built-in PostgreSQL (including its generated credentials), `ca.enabled: false` removes the CA StatefulSet, Service and config, and `hieraSecrets.enabled: false` removes `<c>-hiera-secrets`. This happens at the end of a successful reconcile, once the compiler Deployment has fully rolled out without the component. The CA Secret and the CA PVC are never deleted.
+
 | Kind | Name | Notes |
 |---|---|---|
 | Secret (`kubernetes.io/tls`) | `<c>-ca-tls` | **Retained.** `ca.crt`, `ca.key`, `ca.pub` (CA, generated once), `crl.pem` (synced from the CA every reconcile), `tls.crt`, `tls.key`, `tls.pub`: service certificate `CN=<c>.<ns>.svc`, valid 1 year, re-issued 30 days before expiry or when SANs change. It carries the Puppet `pp_cli_auth` extension, which the operator needs for the CA admin API. |
-| PersistentVolumeClaim | `<c>-ca-data` | **Retained.** CA state; reused on restart or restore if `ca_crt.pem` exists. |
+| PersistentVolumeClaim | `<c>-ca-data` | **Retained.** CA state; reused on restart or restore if `ca_crt.pem` exists. The CA refuses to start (pod log: `FATAL: the CA key on the PVC ... does not match the CA Secret`) when the PVC's CA key differs from the one in `<c>-ca-tls`: restore both from the same backup. |
 | ConfigMap, StatefulSet, Service | `<c>-ca-config`, `<c>-ca` | CA, port `8140`. |
 | ConfigMap | `<c>-g10k` | `git` mode only. |
 | Secret | `<c>-g10k-git-token` | `authType: githubApp` only. |
 | Secret | `<c>-postgres-credentials` | `builtin` without `credentialsSecretRef`. |
 | ConfigMap, StatefulSet, Service | `<c>-postgres-init`, `<c>-postgres` | `builtin` only. |
 | ConfigMap / Secret | `<c>-db-config` (`jetty.ini`) / `<c>-db-database` (`database.ini`) | – |
-| Deployment, Service | `<c>-db` | Ports `8080` (`http`) and `8081` (`https`, mTLS). |
+| Deployment, Service | `<c>-db` | Port `8081` (`https`, mTLS). The plain-HTTP listener (`8080`) is bound to `127.0.0.1` inside the pod, for the readiness probe only. |
 | Secret | `<c>-hiera-secrets` | Mounted at `/etc/puppetlabs/puppet/hiera-secrets` (updates live). |
-| ConfigMap | `<c>-enc-nodes` | One `<certname>.yaml` per non-decommissioned `VoxNode` (updates live). |
+| ConfigMap | `<c>-enc-nodes` | One `<certname>.yaml` per `VoxNode` that is neither `Decommissioned`, `Revoked` nor being deleted (updates live). |
 | ConfigMap | `<c>-server-config` | `puppet.conf`, `puppetdb.conf`, `routes.yaml`, `enc.sh`, `enc-default.yaml`, `hiera.yaml`, … |
 | Deployment, Service | `<c>-server`, `<c>` | Compilers, port `8140`. |
 | HorizontalPodAutoscaler | `<c>-server` | `autoscaling.enabled` only. |
-| Route | `<c>`, `<c>-ca` | `networking.server.openShiftRoute.enabled` / `networking.ca.openShiftRoute.enabled` only. |
+| Route | `<c>`, `<c>-ca` | `networking.server.openShiftRoute.enabled` / `networking.ca.openShiftRoute.enabled` only. A host generated by the router (no `host` set) is kept across updates, as are annotations added by others. |
 
-Annotations set by the operator: `voxkube.io/spec-hash` on managed workloads and Services; `voxkube.io/config-hash`, `voxkube.io/tls-hash`, `voxkube.io/code-revision` and `voxkube.io/observed-commit` on pod templates.
+Annotations set by the operator: `voxkube.io/spec-hash` on managed workloads and Services; `voxkube.io/applied-hash`, `voxkube.io/applied-labels` and `voxkube.io/applied-annotations` on Routes, cert-manager `Certificate`s and `ServiceMonitor`s (they are only updated when what the operator renders changes; labels and annotations the operator set earlier and no longer wants are removed, everything others set is kept); `voxkube.io/config-hash`, `voxkube.io/tls-hash`, `voxkube.io/code-revision` and `voxkube.io/observed-commit` on pod templates.
 
 ---
 
@@ -730,7 +742,7 @@ environment: production
 classes: [profile::nginx]
 parameters:
   http_port: "8080"
-  role: role::webserver
+  role: webserver
   voxkube_cluster: production      # facts.injectKubernetesMetadata
   voxkube_namespace: openvox
   voxkube_node: web-01
@@ -750,7 +762,9 @@ parameters:
 | `duration` | string | `2160h` | – | `Certificate.spec.duration`. |
 | `renewBefore` | string | `720h` | – | `Certificate.spec.renewBefore`. |
 | `targetCertPath` / `targetKeyPath` | string | – | – | Passed through in the `openvox::certs` hash. The operator doesn't write files on the VM; your Puppet code must. |
-| `secretName` | string | generated | – | Overrides **both** the `Certificate` name and its `secretName`. |
+| `secretName` | string | generated | – | Overrides **both** the `Certificate` name and its `secretName`. The operator creates and owns that `Certificate`; if one with the name already exists and belongs to something else, the `VoxNode` reconcile fails with an error instead of taking it over. |
+
+Removing an entry from `certificates` deletes its `Certificate` (only `Certificate`s the `VoxNode` controls).
 
 The generated name is `voxnode-cert-<a>-<b>`, where `<a>` and `<b>` are `metadata.name` and `name`, each lowercased, cut at the first `.`, with every character outside `[a-z0-9-]` replaced by `-`. The `VoxNode` controller watches these Secrets, so `readyCertificates` updates as soon as cert-manager issues them.
 
@@ -772,16 +786,17 @@ Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap
 
 | `spec.state` | Operator actions | `status.phase` | `Ready` (reason) | Requeue |
 |---|---|---|---|---|
-| `PendingApproval` | Nothing is signed. The message says whether a CSR has arrived and which `pp_role` it requests; the CSR's extensions are copied to `status.certificateExtensions`. | `PendingCSR` | `False` (`PendingApproval`) | on change |
+| `PendingApproval` | Nothing is signed. The message says whether a CSR has arrived and which `pp_role` it requests; the CSR's extensions are copied to `status.certificateExtensions`. | `PendingCSR` | `False` (`PendingApproval`) | 1 min |
 | `Active`, no CSR yet | – | `PendingCSR` | `False` (`AwaitingCSR`) | 30 s |
 | `Active`, CSR pending | Signs it (`PUT …/certificate_status/<certname>`), unless `autosignMode: off`. | `Signed` / `PendingCSR` | `True` (`CertificateSigned`) / `False` (`AwaitingManualSigning`) | 30 s while waiting |
 | `Active`, signed, never seen in OpenVox DB | Reconciles certificates, ENC and Hiera. | `Signed` | `True` (`CertificateSigned`) | 30 s |
 | `Active`, signed, OpenVox DB query fails | As above; the error is logged and shown in the message. A node already seen keeps `Active` and its last check-in. | `Signed` (`Active` if seen before) | `True` (`DatabaseUnreachable`, or `NodeActive`) | 30 s |
 | `Active`, reporting | Reads `/pdb/query/v4/nodes/<certname>`. | `Active` | `True` (`NodeActive`) | 5 min |
+| `Active`, deactivated or expired in OpenVox DB | – (the node's next Puppet run reactivates it) | `Signed` | `False` (`NodeDeactivated`) | 5 min |
 | `Active`, certificate revoked on the CA | – | `Error` | `False` (`CertificateRevokedOnCA`) | on change |
-| `Revoked` | `PUT …/certificate_status/<certname> {"desired_state":"revoked"}`. The next `VoxCluster` reconcile copies the new CRL to the compilers. | `Revoked` | `True` (`CertificateRevoked`) | on change |
-| `Decommissioned` | `PUT /puppet-ca/v1/clean`, then PuppetDB `deactivate node`, then deletes the node's `Certificate`s and removes its ENC and Hiera entries. CA and DB errors are logged and don't block. | `Decommissioned` | `True` (`NodeDecommissioned`) | – |
-| *object deleted* | Finalizer `voxkube.io/node-cleanup` runs the decommission steps (skipped if the `VoxCluster` is gone). | – | – | – |
+| `Revoked` | `PUT …/certificate_status/<certname> {"desired_state":"revoked"}` and removes its ENC and Hiera entries. The next `VoxCluster` reconcile copies the new CRL to the compilers. | `Revoked` | `True` (`CertificateRevoked`) | on change |
+| `Decommissioned` | `PUT /puppet-ca/v1/clean`, then PuppetDB `deactivate node`, then deletes the node's `Certificate`s and removes its ENC and Hiera entries. Clears `lastSeenTime`, `lastReportStatus`, `certificateFingerprint` and `certificateExtensions`. A failed CA or DB step is retried; steps that succeeded aren't repeated. Without the operator's own CA (`ca.enabled: false`) or OpenVox DB, that step counts as done. | `Decommissioned` | `True` (`NodeDecommissioned`), or `False` (`CleanupPending`) while a step is failing | 30 s while a step is failing |
+| *object deleted* | Finalizer `voxkube.io/node-cleanup` runs the CA and DB steps and is released only when both succeeded (`Ready=False`, `CleanupPending` meanwhile). Released without cleanup when the `VoxCluster` is gone or being deleted, or when the `VoxNode` has the annotation `voxkube.io/skip-cleanup: "true"` (for a CA that is lost for good). The node leaves the ENC and Hiera as soon as deletion starts. | – | `False` (`CleanupPending`) while blocked | 30 s |
 | *cluster missing* | – | `Error` | `False` (`ClusterNotFound`) | on cluster change |
 
 `VoxNode`s are also re-queued whenever their `VoxCluster` changes (for example when the CA becomes ready).
@@ -795,7 +810,7 @@ Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap
 | `certificateFingerprint` | string | Fingerprint reported by the CA. |
 | `certificateExtensions` | map[string]string | Puppet extensions of the pending CSR, then of the signed certificate (re-read when the fingerprint changes), e.g. `pp_role`, `pp_datacenter`. Registered extensions by name, site-specific ones (`1.3.6.1.4.1.34380.1.2.*`) by OID. `pp_preshared_key` is never shown. |
 | `role` | string | Effective role: `spec.classification.role`, else `certificateExtensions.pp_role`. Passed to Puppet as `$role`. |
-| `caCleaned` / `puppetDBDeactivated` | bool | `true` after `Decommissioned`. |
+| `caCleaned` / `puppetDBDeactivated` | bool | `true` once that cleanup step succeeded (`Decommissioned` or deletion); reset to `false` when the node is active, pending or revoked again. |
 | `readyCertificates` | int32 | Requested certificates whose Secret has `tls.crt` and `tls.key`. |
 | `lastReportStatus` | string | `latest_report_status` from OpenVox DB (`changed`, `unchanged`, `failed`). |
 | `lastSeenTime` | timestamp | Latest of the report, facts and catalog timestamps in OpenVox DB. |
@@ -818,13 +833,13 @@ Printer columns: `.spec.clusterRef`, `.status.discoveredNodes`, `.status.endpoin
 | `selector` | [`DiscoverySelectorSpec`](#voxdiscoveryspecselector) | – | – | Node filter. All criteria must match (AND). |
 | `addressFact` | string | `networking.ip` | – | Dotted fact path for the endpoint address (for example `networking.ip6` for IPv6). Nodes without a valid IP are skipped. |
 | `ports` | [][`DiscoveryPort`](#voxdiscoveryspecports) | – | **required** | Ports on the Service, the slices and the ServiceMonitor endpoints. |
-| `endpointLabels` | map[string]string | – | Names: `[a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])?`, max 63, not reserved (see `targetLabels`), not also in `serviceMonitor.targetLabels`. Invalid → `Ready=False`, reason `InvalidLabels`. | Per-target labels: label name → fact path (dots for nesting, e.g. `trusted.extensions.pp_role`). Missing facts are left out; values that are not valid Kubernetes label values are skipped and counted in the `Ready` message. VoxNode labels `monitoring.voxkube.io/<label>` are added on top and win. |
+| `endpointLabels` | map[string]string | – | Names: `[a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])?`, max 63, not reserved (see `targetLabels`), not also in `serviceMonitor.targetLabels`. Invalid → `Ready=False`, reason `InvalidLabels`. | Per-target labels: label name → fact path (dots for nesting, e.g. `trusted.extensions.pp_role`; `trusted.*` paths are also looked up in the node's trusted data from the inventory). Missing facts are left out; values that are not valid Kubernetes label values are skipped and counted in the `Ready` message. VoxNode labels `monitoring.voxkube.io/<label>` are added on top and win. |
 | `serviceMonitor` | [`DiscoveryServiceMonitorSpec`](#voxdiscoveryspecservicemonitor) | – | – | Optional ServiceMonitor. |
 
 The operator runs this PQL query over mTLS (`GET <databaseURL>/pdb/query/v4?query=…`):
 
 ```
-inventory[certname, environment, facts] {
+inventory[certname, environment, facts, trusted] {
   certname in nodes[certname] { node_state = "active" }
   and environment = "<environment>"
   and certname in resources[certname] { type = "Class" and title = "Profile::Node_exporter" }   # per class
@@ -857,13 +872,13 @@ Fact filters are then applied client-side. Nodes whose `VoxNode` is `Revoked` or
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `enabled` | bool | `false` | – | Creates `monitoring.coreos.com/v1` `ServiceMonitor` `<vd>`, one endpoint per port. Skipped if the CRD is absent. |
+| `enabled` | bool | `false` | – | Creates `monitoring.coreos.com/v1` `ServiceMonitor` `<vd>`, one endpoint per port. Skipped if the CRD is absent. Setting it back to `false` deletes the ServiceMonitor and the scraper certificate Secret. |
 | `interval` / `scrapeTimeout` | string | `30s` / `10s` | – | Scrape settings. |
 | `preserveNodeHostnameAsInstance` | bool | `true` | – | Relabels `__meta_kubernetes_endpointslice_endpoint_node_name` → `instance`, so `instance` is the certname. |
 | `additionalLabels` | map[string]string | – | – | Extra labels on the ServiceMonitor. |
-| `targetLabels` | map[string]string | – | Keys: Prometheus label names (`[a-zA-Z_][a-zA-Z0-9_]*`, no `__` prefix), not `job`, `instance`, `namespace`, `service`, `endpoint`, `pod`, `container`. Values: Kubernetes label values. Invalid → `Ready=False`, reason `InvalidLabels`. | Static labels on every scraped target, e.g. `role: web`. Set on the headless Service and listed in the ServiceMonitor's `targetLabels`. |
+| `targetLabels` | map[string]string | – | Keys: `[a-zA-Z]([a-zA-Z0-9_]*[a-zA-Z0-9])?`, max 63 (valid as both Prometheus label names and Kubernetes label keys), not `job`, `instance`, `namespace`, `service`, `endpoint`, `pod`, `container`. Values: Kubernetes label values. Invalid → `Ready=False`, reason `InvalidLabels`. | Static labels on every scraped target, e.g. `role: web`. Set on the headless Service and listed in the ServiceMonitor's `targetLabels`. |
 | `tls.enabled` | bool | `false` | – | Sets `scheme: https` and `tlsConfig`. |
-| `tls.mode` | string | `openvoxCA` | `openvoxCA` \| `secretRef` | `openvoxCA` mints Secret `<vd>-prometheus-scraper-tls` (`ca.crt`, `tls.crt`, `tls.key`; `CN=prometheus-scraper`, valid 1 year, renewed 30 days before expiry, **no** CA admin rights). `secretRef` uses `tls.secretName` (keys `ca.crt`, `tls.crt`, `tls.key`). |
+| `tls.mode` | string | `openvoxCA` | `openvoxCA` \| `secretRef` | `openvoxCA` mints Secret `<vd>-prometheus-scraper-tls` (`ca.crt`, `tls.crt`, `tls.key`; `CN=prometheus-scraper`, valid 1 year, renewed 30 days before expiry, **no** CA admin rights). `secretRef` uses `tls.secretName` (keys `ca.crt`, `tls.crt`, `tls.key`). Switching away from `openvoxCA` (or turning TLS off) deletes the minted Secret. |
 | `tls.secretName` | string | – | – | For `secretRef`. |
 
 Prometheus connects to the endpoint IP, so with TLS the exporter's certificate must contain the node's IP as a SAN (Puppet agent certificates normally don't).
@@ -942,11 +957,11 @@ Served on the operator's metrics endpoint (`:8080/metrics`; chart: `metrics.*`),
 
 | Metric | Value | Present for |
 |---|---|---|
-| `voxkube_node_active` | `1` if `spec.state` is `Active`, else `0` | every VoxNode |
+| `voxkube_node_active` | `1` if `spec.state` is `Active` (or empty, the API default), else `0` | every VoxNode |
 | `voxkube_node_last_report_failed` | `1` if `status.lastReportStatus` is `failed`, else `0` | `Active` VoxNodes with a report |
 | `voxkube_node_last_seen_timestamp_seconds` | `status.lastSeenTime` as Unix time | `Active` VoxNodes seen in OpenVox DB |
 
-Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `state`, plus every VoxNode label `monitoring.voxkube.io/<label>` as `<label>` (names that aren't valid Prometheus label names, are reserved, or clash with the fixed labels are skipped; a label missing on a node is empty). The values refresh as often as the VoxNode controller reads OpenVox DB (every 5 min, 30 s while waiting for a first run).
+Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `state`, plus the VoxNode labels `monitoring.voxkube.io/<label>` listed in `--node-metric-labels` (chart: `metrics.nodeLabels`, default `alerts`), as `<label>`, empty on nodes that lack one. Other monitoring labels are not exported: the label set is fixed so that labelling one VoxNode never changes the identity of every other series. Add the names you route or silence on (e.g. `team`) to the list. The values refresh as often as the VoxNode controller reads OpenVox DB (every 5 min, 30 s while waiting for a first run).
 
 ### Operator command-line flags
 
@@ -958,6 +973,7 @@ Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `
 | `--health-probe-bind-address` | `:8081` | `/healthz` and `/readyz`. |
 | `--leader-elect` | `false` | Enable leader election (the Helm chart sets `leaderElect: true`). |
 | `--watch-namespace` | – (all) | Restrict the operator to one namespace. |
+| `--node-metric-labels` | `alerts` | Comma-separated `monitoring.voxkube.io/<name>` VoxNode labels exported on the `voxkube_node_*` metrics. |
 
 Standard controller-runtime `--zap-*` logging flags are also accepted.
 

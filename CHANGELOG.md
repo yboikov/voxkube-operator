@@ -8,6 +8,63 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.2.7]
+
+Fixes every finding of a full code review of 0.2.6.
+
+### Breaking
+- `voxkube_node_*` metrics no longer copy every `monitoring.voxkube.io/<label>` VoxNode label. Only the labels in
+  the new `--node-metric-labels` flag (chart: `metrics.nodeLabels`, default `alerts`) are exported, so adding a
+  label to one VoxNode no longer changes the series of all others. Add any other label you alert or route on.
+- `externalHttp` node classification: an ENC server error, timeout or connection failure now fails the agent's
+  catalog request instead of silently classifying the node with the default. HTTP 404 still falls back to the
+  default.
+- `VoxDiscovery.spec.serviceMonitor.targetLabels` keys must also be valid Kubernetes label keys (start with a
+  letter, end with a letter or digit, at most 63 characters). They always ended up as Service labels, so other
+  keys failed there anyway.
+- The OpenVox DB Service no longer exposes plain HTTP port 8080; the listener is bound to localhost and used only
+  by the readiness probe. Use the mTLS port 8081.
+
+### Added
+- `voxkube.io/skip-cleanup: "true"` on a VoxNode lets it be deleted without CA/OpenVox DB cleanup (for a CA that
+  is lost for good).
+- `--node-metric-labels` operator flag and `metrics.nodeLabels` chart value.
+
+### Fixed
+- OpenVox DB served unauthenticated HTTP on its Service; the plain listener is now localhost-only.
+- GitHub App token minting failures unmounted the token Secret and made the operator poll unauthenticated;
+  the last cached token now stays mounted, `CodeReady` reports `GitAuthFailed` and the compilers keep their
+  revision.
+- `code.git.pollInterval` below 10s is raised to 10s.
+- `voxkube.io/sync-now` now also rolls the compilers in synchronized mode.
+- SSH Git remotes failed under OpenShift's random UIDs (OpenSSH needs a passwd entry); `deploy.sh` now adds one
+  and the openvox-server image makes `/etc/passwd` group-writable.
+- A deleted VoxNode released its finalizer even when the CA clean or OpenVox DB deactivation failed; it now stays
+  (`CleanupPending`) until both succeed, unless its VoxCluster is gone or being deleted.
+- `Decommissioned` reported the cleanup as done even when it failed, repeated it on every reconcile and kept the
+  last check-in, report status and certificate data.
+- Nodes deactivated or expired in OpenVox DB were reported as `Active`; they now show `NodeDeactivated`.
+- `Revoked` and deleting VoxNodes stayed in the ENC and Hiera data.
+- The ENC was rendered before the VoxNode status was saved, so a role change took one more reconcile to apply.
+- `PendingApproval` VoxNodes weren't requeued, so a CSR's `pp_role` showed up only after another change.
+- Certificates removed from `VoxNode.spec.certificates` were never deleted; an existing foreign `Certificate`
+  with the same name was taken over. The `secretName` field doc wrongly said it could point at an existing Secret.
+- `autoCreateVoxNode` skipped certnames that had a VoxNode in another VoxCluster of the same namespace.
+- Routes without a `host` got a new generated host on every reconcile, and annotations added by others were
+  dropped; Routes, Certificates and ServiceMonitors are now updated only when their rendered content changes.
+- Switching off OpenVox DB, the built-in PostgreSQL, the CA or the Hiera Secret left their objects running.
+- The CA started with a PVC and a CA Secret from different backups; it now refuses to start with a clear error.
+- Switching `serviceMonitor.enabled` off left the ServiceMonitor and the scraper certificate behind.
+- `trusted.*` fact paths in VoxDiscovery selectors and `endpointLabels` found nothing, because the inventory
+  query didn't return trusted data.
+- VoxNodes with an empty `spec.state` (the API default) counted as inactive in the metrics.
+- Labels and annotations the operator set on Routes, Certificates and ServiceMonitors are removed when dropped
+  from the spec; labels, annotations, finalizers and owner references added by others are kept.
+- Components switched off are pruned only after the compilers have rolled out without them.
+- Nodes deactivated in OpenVox DB don't carry the old machine's report status (certname reuse).
+- README examples used `role::webserver` as the role; roles used with role-scoped Hiera secrets must be valid
+  label values, so the examples now use `webserver`.
+
 ## [0.2.6]
 
 ### Added

@@ -66,7 +66,7 @@ func TestBuildDiscoveryPQL(t *testing.T) {
 		PQL:         `facts.os.family = "RedHat"`,
 	})
 	for _, want := range []string{
-		`inventory[certname, environment, facts] {`,
+		`inventory[certname, environment, facts, trusted] {`,
 		`certname in nodes[certname] { node_state = "active" }`,
 		`environment = "prod\"uction"`,
 		`title = "Profile::Node_exporter"`,
@@ -170,7 +170,7 @@ func TestENCModesMetadataAndReports(t *testing.T) {
 		},
 	}
 	script := renderENCScript(cluster)
-	if !strings.Contains(script, `curl -fsS --max-time 10 'https://enc.example.com/nodes'"/${CERTNAME}"`) {
+	if !strings.Contains(script, `curl -sS --max-time 10 -o "$BODY" -w '%{http_code}' 'https://enc.example.com/nodes'"/${CERTNAME}"`) {
 		t.Errorf("expected external ENC fallback, got:\n%s", script)
 	}
 	def := string(renderDefaultENC(cluster))

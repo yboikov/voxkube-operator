@@ -194,6 +194,14 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			logger.Error(err, "failed to reconcile Prometheus ServiceMonitor")
 			return ctrl.Result{}, err
 		}
+	} else if err := r.deleteServiceMonitor(ctx, disc); err != nil {
+		return ctrl.Result{}, err
+	}
+	// The operator-minted scraper certificate goes when the ServiceMonitor or openvoxCA TLS is switched off.
+	if scraperSecName != fmt.Sprintf("%s-prometheus-scraper-tls", disc.Name) {
+		if err := r.deleteControlledSecret(ctx, disc, fmt.Sprintf("%s-prometheus-scraper-tls", disc.Name)); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	now := metav1.Now()
@@ -304,7 +312,7 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 		if decommissionedSet[n.Certname] {
 			continue
 		}
-		ip := net.ParseIP(LookupFactString(n.Facts, addrFact))
+		ip := net.ParseIP(n.Fact(addrFact))
 		if ip == nil {
 			continue
 		}
@@ -498,13 +506,13 @@ func (r *VoxDiscoveryReconciler) reconcileServiceMonitor(
 	existing.SetGroupVersionKind(smObj.GroupVersionKind())
 	err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, existing)
 	if apierrors.IsNotFound(err) {
+		stampAppliedHash(smObj)
 		if createErr := r.Create(ctx, smObj); createErr != nil {
 			if !meta.IsNoMatchError(createErr) && !strings.Contains(createErr.Error(), "no matches for kind \"ServiceMonitor\"") {
 				return scraperSecName, createErr
 			}
 		}
-	} else if err == nil {
-		smObj.SetResourceVersion(existing.GetResourceVersion())
+	} else if err == nil && prepareUnstructuredUpdate(existing, smObj) {
 		if updErr := r.Update(ctx, smObj); updErr != nil {
 			return scraperSecName, updErr
 		}
@@ -588,14 +596,15 @@ var reservedTargetLabels = map[string]bool{
 	"job": true, "instance": true, "namespace": true, "service": true, "endpoint": true, "pod": true, "container": true,
 }
 
-var prometheusLabelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
-
 // validateTargetLabels checks that serviceMonitor.targetLabels can be both Service labels and Prometheus labels.
 func validateTargetLabels(labels map[string]string) error {
 	for _, k := range sortedKeys(labels) {
 		switch {
-		case !prometheusLabelName.MatchString(k) || strings.HasPrefix(k, "__"):
-			return fmt.Errorf("serviceMonitor.targetLabels: %q is not a valid Prometheus label name", k)
+		case !endpointLabelName.MatchString(k) || len(k) > 63:
+			// Target labels become Service labels, so they must be valid as both Prometheus label names and
+			// Kubernetes label keys: start with a letter, end with a letter or digit, at most 63 characters.
+			return fmt.Errorf("serviceMonitor.targetLabels: %q must be a Prometheus label name that is also a valid Kubernetes label key "+
+				"(letters, digits and _, starting with a letter and ending with a letter or digit, at most 63 characters)", k)
 		case reservedTargetLabels[k]:
 			return fmt.Errorf("serviceMonitor.targetLabels: %q is reserved by Prometheus", k)
 		}
@@ -670,7 +679,7 @@ func endpointTargetLabels(disc *openvoxv1alpha1.VoxDiscovery, node DiscoveredPup
 	labels := make(map[string]string)
 	skipped := 0
 	for name, factPath := range disc.Spec.EndpointLabels {
-		v := LookupFactString(node.Facts, factPath)
+		v := node.Fact(factPath)
 		if v == "" {
 			continue
 		}
@@ -827,7 +836,8 @@ func voxDiscoveryLabels(name string) map[string]string {
 }
 
 // removeDiscoveryResources deletes the headless Service, EndpointSlices and ServiceMonitor owned by disc.
-// The scraper TLS Secret is kept so that re-enabling discovery reuses the certificate.
+// The scraper TLS Secret is kept so that re-enabling the database reuses the certificate; it is deleted only when
+// the ServiceMonitor (or its openvoxCA TLS) is switched off.
 func (r *VoxDiscoveryReconciler) removeDiscoveryResources(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) error {
 	slices := &discoveryv1.EndpointSliceList{}
 	if err := r.List(ctx, slices, client.InNamespace(disc.Namespace), client.MatchingLabels{
@@ -854,6 +864,11 @@ func (r *VoxDiscoveryReconciler) removeDiscoveryResources(ctx context.Context, d
 		return err
 	}
 
+	return r.deleteServiceMonitor(ctx, disc)
+}
+
+// deleteServiceMonitor deletes the VoxDiscovery's ServiceMonitor if it exists and is controlled by it.
+func (r *VoxDiscoveryReconciler) deleteServiceMonitor(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) error {
 	sm := &unstructured.Unstructured{}
 	sm.SetGroupVersionKind(schema.GroupVersionKind{Group: "monitoring.coreos.com", Version: "v1", Kind: "ServiceMonitor"})
 	if err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: disc.Name}, sm); err == nil {
@@ -866,6 +881,18 @@ func (r *VoxDiscoveryReconciler) removeDiscoveryResources(ctx context.Context, d
 		return err
 	}
 	return nil
+}
+
+// deleteControlledSecret deletes the named Secret if it exists and is controlled by disc.
+func (r *VoxDiscoveryReconciler) deleteControlledSecret(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery, name string) error {
+	sec := &corev1.Secret{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: name}, sec); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	if !metav1.IsControlledBy(sec, disc) {
+		return nil
+	}
+	return client.IgnoreNotFound(r.Delete(ctx, sec))
 }
 
 // SetupWithManager registers VoxDiscoveryReconciler with the controller manager.

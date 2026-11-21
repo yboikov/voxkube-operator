@@ -193,6 +193,14 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 	if err := r.reconcileNetworking(ctx, cluster, st); err != nil {
 		return fmt.Errorf("reconciling networking: %w", err)
 	}
+
+	// 9. Remove what switched-off components left behind, last and only once the compilers have rolled out
+	// without them, so no compiler pod still mounts (e.g.) a Hiera Secret that is about to disappear.
+	if r.serverRolledOut(ctx, cluster) {
+		if err := r.pruneDisabledComponents(ctx, cluster); err != nil {
+			return fmt.Errorf("pruning disabled components: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -492,12 +500,15 @@ func (r *VoxClusterReconciler) createOrUpdateUnstructured(ctx context.Context, d
 	existing.SetGroupVersionKind(desired.GroupVersionKind())
 	err := r.Get(ctx, types.NamespacedName{Namespace: desired.GetNamespace(), Name: desired.GetName()}, existing)
 	if apierrors.IsNotFound(err) {
+		stampAppliedHash(desired)
 		return r.Create(ctx, desired)
 	}
 	if err != nil {
 		return err
 	}
-	desired.SetResourceVersion(existing.GetResourceVersion())
+	if !prepareUnstructuredUpdate(existing, desired) {
+		return nil
+	}
 	return r.Update(ctx, desired)
 }
 
