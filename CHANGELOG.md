@@ -8,6 +8,18 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Fixed
+- VoxDiscovery reconciled in a loop (about once a second, querying OpenVox DB each time) because writing its own
+  `lastSyncTime` re-triggered it; it now runs every `syncInterval` and on spec, label or annotation changes (#29).
+- A VoxNode check-in (new `lastSeenTime`) re-ran the whole VoxCluster reconcile (Git poll, CRL fetch, every
+  workload) and every VoxDiscovery; VoxCluster status changes (`readyReplicas`, `observedCommit`) re-ran every
+  VoxNode. Controllers now only react to changes that matter to them (#29).
+- VoxNode status, the HPA, VoxDiscovery's headless Service and EndpointSlices are written only when they change (#29).
+- The ENC ConfigMap and the Hiera Secret had two writers (VoxCluster and every VoxNode); the VoxCluster controller is
+  now the only one. It renders them first, so node changes reach the compilers even while a later step fails (#29).
+- The mTLS HTTP client to the CA and OpenVox DB was rebuilt on every reconcile; it is now kept per VoxCluster and
+  rebuilt only when the certificates change (#29).
+
 ## [0.2.7]
 
 Fixes every finding of a full code review of 0.2.6.

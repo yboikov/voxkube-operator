@@ -56,6 +56,12 @@ update that section in the same change. Never document a field as working unless
     expose it on the Service: it is unauthenticated.
   - The `voxkube_node_*` metric label set is fixed per process (`--node-metric-labels`). Don't derive label names
     from whatever labels the VoxNodes carry: that changes the identity of every series when one node is labelled.
+  - Controllers react only to changes that matter to them (`predicates.go`): never let a status write re-trigger
+    its own controller or fan out (a VoxNode check-in must not re-run the VoxCluster stack; VoxDiscovery's
+    `lastSyncTime` must not trigger the next sync). Diff before every write (`Update`, `Status().Update`).
+  - The VoxCluster controller is the only writer of `<cluster>-enc-nodes` and `<cluster>-hiera-secrets`. It renders
+    them first in `reconcileStack`, so VoxNode changes apply even while later steps fail. VoxNodes don't write them.
+  - CA and OpenVox DB mTLS clients come from `mtlsClients` (one per VoxCluster, rebuilt on credential change).
   - The external ENC (`enc.sh`, `externalHttp`) falls back to the default only on HTTP 404. Any other failure
     exits non-zero so the catalog request fails, rather than compiling the wrong classification.
 

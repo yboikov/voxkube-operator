@@ -829,7 +829,7 @@ Printer columns: `.spec.clusterRef`, `.status.discoveredNodes`, `.status.endpoin
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `clusterRef` | string | – | **required** | `VoxCluster` whose OpenVox DB is queried. |
-| `syncInterval` | duration | `60s` | Go duration | Requeue interval. |
+| `syncInterval` | duration | `60s` | Go duration | How often OpenVox DB is queried. Changes to the VoxDiscovery spec, its VoxCluster or VoxNodes (state, `monitoring.voxkube.io/*` labels) trigger an extra sync. |
 | `selector` | [`DiscoverySelectorSpec`](#voxdiscoveryspecselector) | – | – | Node filter. All criteria must match (AND). |
 | `addressFact` | string | `networking.ip` | – | Dotted fact path for the endpoint address (for example `networking.ip6` for IPv6). Nodes without a valid IP are skipped. |
 | `ports` | [][`DiscoveryPort`](#voxdiscoveryspecports) | – | **required** | Ports on the Service, the slices and the ServiceMonitor endpoints. |

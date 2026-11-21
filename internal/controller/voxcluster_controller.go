@@ -22,6 +22,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -101,6 +102,7 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	cluster := &openvoxv1alpha1.VoxCluster{}
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
+			mtlsClients.forget(req.Namespace + "/" + req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -132,6 +134,13 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, st *clusterState) error {
 	logger := log.FromContext(ctx)
+
+	// 0. ENC and Hiera data first, so that a VoxNode change (revoked, decommissioned, deleted, new role) reaches
+	// the compilers even while a later step (CA, Git, OpenVox DB) is failing. This controller is their only writer.
+	if err := r.reconcileENCConfigMap(ctx, cluster); err != nil {
+		return fmt.Errorf("reconciling ENC ConfigMap: %w", err)
+	}
+	hieraSecretName, hieraErr := r.reconcileHieraBridge(ctx, cluster)
 
 	// 1. CA key material and the shared service certificate (<cluster>-ca-tls).
 	secName, tlsHash, err := r.reconcileCAPKI(ctx, cluster)
@@ -171,17 +180,11 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 		return fmt.Errorf("reconciling OpenVox DB: %w", err)
 	}
 
-	// 6. Secret -> Hiera bridge.
-	hieraSecretName, err := r.reconcileHieraBridge(ctx, cluster)
-	if err != nil {
-		return fmt.Errorf("reconciling Hiera Secret Bridge: %w", err)
+	// 6. The Hiera Secret (rendered in step 0) must exist before the compilers mount it.
+	if hieraErr != nil {
+		return fmt.Errorf("reconciling Hiera Secret Bridge: %w", hieraErr)
 	}
 	st.hieraSecretName = hieraSecretName
-
-	// 7. ENC data.
-	if err := r.reconcileENCConfigMap(ctx, cluster); err != nil {
-		return fmt.Errorf("reconciling ENC ConfigMap: %w", err)
-	}
 
 	// 8. Compilers, autoscaling and networking.
 	if err := r.reconcileServerDeployment(ctx, cluster, st); err != nil {
@@ -515,7 +518,7 @@ func (r *VoxClusterReconciler) createOrUpdateUnstructured(ctx context.Context, d
 // SetupWithManager registers VoxClusterReconciler with the controller manager.
 func (r *VoxClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&openvoxv1alpha1.VoxCluster{}).
+		For(&openvoxv1alpha1.VoxCluster{}, builder.WithPredicates(specOrMetaChanged())).
 		Owns(&appsv1.Deployment{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
@@ -527,9 +530,19 @@ func (r *VoxClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		).
 		Watches(
 			&openvoxv1alpha1.VoxNode{},
-			handler.EnqueueRequestsFromMapFunc(r.findClustersInNamespace),
+			handler.EnqueueRequestsFromMapFunc(r.clusterForVoxNode),
+			builder.WithPredicates(voxNodeChangedForCluster()),
 		).
 		Complete(r)
+}
+
+// clusterForVoxNode enqueues the VoxCluster a VoxNode belongs to.
+func (r *VoxClusterReconciler) clusterForVoxNode(_ context.Context, obj client.Object) []reconcile.Request {
+	n, ok := obj.(*openvoxv1alpha1.VoxNode)
+	if !ok || n.Spec.ClusterRef == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: n.Namespace, Name: n.Spec.ClusterRef}}}
 }
 
 func (r *VoxClusterReconciler) findClustersInNamespace(ctx context.Context, obj client.Object) []reconcile.Request {

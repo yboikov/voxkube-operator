@@ -22,6 +22,7 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	openvoxv1alpha1 "github.com/yboikov/voxkube-operator/api/v1alpha1"
 )
@@ -501,7 +502,10 @@ func TestVoxNodeReconciler_SignENCAndAtomicDecommission(t *testing.T) {
 		t.Errorf("expected CSR for web01.example.com to be signed on CA, got %v", caSigned)
 	}
 
-	// Verify ENC ConfigMap was rendered with role and parameters
+	// The VoxCluster controller (the only writer of the ENC) renders the node's classification.
+	if err := (&VoxClusterReconciler{Client: k8sClient, Scheme: s}).reconcileENCConfigMap(ctx, cluster); err != nil {
+		t.Fatal(err)
+	}
 	encCM := &corev1.ConfigMap{}
 	if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: "openvox", Name: "production-enc-nodes"}, encCM); err != nil {
 		t.Fatalf("expected ENC ConfigMap production-enc-nodes: %v", err)
@@ -686,6 +690,18 @@ func TestVoxDiscoveryReconciler_EndpointSlicesAndOpenVoxCAMTLS(t *testing.T) {
 	}
 	if len(scraperSec.Data["tls.crt"]) == 0 || len(scraperSec.Data["tls.key"]) == 0 || len(scraperSec.Data["ca.crt"]) == 0 {
 		t.Error("expected prometheus-scraper Secret to contain ca.crt, tls.crt, and tls.key")
+	}
+
+	// 3. A second reconcile with nothing changed writes nothing but the status (lastSyncTime).
+	var writes []string
+	reconciler.Client = interceptor.NewClient(k8sClient, countingWrites(&writes))
+	if _, err := reconciler.Reconcile(ctx, ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "openvox", Name: "puppet-node-exporter"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 0 {
+		t.Errorf("a no-op VoxDiscovery reconcile must not write objects, got %v", writes)
 	}
 }
 

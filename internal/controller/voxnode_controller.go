@@ -1,7 +1,9 @@
 package controller
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -166,10 +169,8 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if err := r.updateVoxNodeStatus(ctx, req.NamespacedName, *status); err != nil {
 		return ctrl.Result{}, err
 	}
-	// Render the ENC and Hiera after the status update: the ENC reads the role from status.
-	if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
-		return ctrl.Result{}, err
-	}
+	// The VoxCluster controller, the only writer of the ENC and Hiera data, re-renders them when the spec,
+	// the role or the certificate extensions in this status change (it watches VoxNodes for exactly that).
 	return result, nil
 }
 
@@ -180,14 +181,9 @@ func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1
 		return ctrl.Result{}, nil
 	}
 	logger := log.FromContext(ctx)
+	// The node leaves the ENC and Hiera as soon as deletion starts: the VoxCluster controller reacts to the
+	// deletion timestamp and nodeServedBy skips deleting VoxNodes.
 	clusterLive := clusterFound && cluster.DeletionTimestamp.IsZero()
-	// Drop the node from the ENC and Hiera right away (nodeServedBy skips deleting VoxNodes), whatever the cleanup
-	// does: a machine being deleted must not keep getting catalogs or secrets.
-	if clusterLive {
-		if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
 	switch {
 	case node.Annotations[AnnotationSkipCleanup] == "true":
 		logger.Info("skip-cleanup annotation set; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
@@ -428,6 +424,9 @@ func (r *VoxNodeReconciler) updateVoxNodeStatus(ctx context.Context, key types.N
 		if err := r.Get(ctx, key, latest); err != nil {
 			return err
 		}
+		if statusJSONEqual(latest.Status, desired) {
+			return nil // nothing changed: no write, no watch event
+		}
 		latest.Status = desired
 		return r.Status().Update(ctx, latest)
 	})
@@ -611,19 +610,12 @@ func sanitizeLabelValue(s string) string {
 	return out
 }
 
-func (r *VoxNodeReconciler) refreshClusterHieraAndENC(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) error {
-	clusterRec := &VoxClusterReconciler{Client: r.Client, Scheme: r.Scheme}
-	if _, err := clusterRec.reconcileHieraBridge(ctx, cluster); err != nil {
-		return err
-	}
-	return clusterRec.reconcileENCConfigMap(ctx, cluster)
-}
-
 // SetupWithManager registers VoxNodeReconciler with the controller manager.
 func (r *VoxNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&openvoxv1alpha1.VoxNode{}).
-		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.nodesForCluster)).
+		For(&openvoxv1alpha1.VoxNode{}, builder.WithPredicates(specOrMetaChanged())).
+		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.nodesForCluster),
+			builder.WithPredicates(voxClusterChangedForDependents())).
 		Watches(&corev1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.nodesForSecret)).
 		Complete(r)
 }
@@ -668,4 +660,12 @@ func (r *VoxNodeReconciler) nodesForSecret(ctx context.Context, obj client.Objec
 		}
 	}
 	return reqs
+}
+
+// statusJSONEqual compares two statuses as the API server stores them (times at second precision), so a
+// freshly computed status equal to the stored one is recognised as unchanged.
+func statusJSONEqual(a, b interface{}) bool {
+	ja, errA := json.Marshal(a)
+	jb, errB := json.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(ja, jb)
 }

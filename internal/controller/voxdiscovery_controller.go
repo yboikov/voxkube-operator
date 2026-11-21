@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,6 +26,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
@@ -266,6 +269,7 @@ func (r *VoxDiscoveryReconciler) reconcileHeadlessService(ctx context.Context, d
 	existing := &corev1.Service{}
 	err := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: svcName}, existing)
 	if apierrors.IsNotFound(err) {
+		svc.Annotations = map[string]string{AnnotationSpecHash: specHash(svc.Spec)}
 		if err := r.Create(ctx, svc); err != nil {
 			return "", err
 		}
@@ -274,8 +278,14 @@ func (r *VoxDiscoveryReconciler) reconcileHeadlessService(ctx context.Context, d
 	if err != nil {
 		return "", err
 	}
+	// Compare what we render (the API server defaults targetPort and friends on the live object).
+	h := specHash(svc.Spec)
+	if existing.Annotations[AnnotationSpecHash] == h && reflect.DeepEqual(existing.Labels, svc.Labels) {
+		return svcName, nil
+	}
 	existing.Spec.Ports = svc.Spec.Ports
 	existing.Labels = svc.Labels
+	existing.Annotations = mergeStringMaps(existing.Annotations, map[string]string{AnnotationSpecHash: h})
 	if err := r.Update(ctx, existing); err != nil {
 		return "", err
 	}
@@ -432,6 +442,11 @@ func (r *VoxDiscoveryReconciler) reconcileEndpointSlices(
 					return 0, 0, 0, err
 				}
 				continue
+			}
+			if equality.Semantic.DeepEqual(existing.Endpoints, slice.Endpoints) &&
+				equality.Semantic.DeepEqual(existing.Ports, slice.Ports) &&
+				reflect.DeepEqual(existing.Labels, slice.Labels) {
+				continue // unchanged
 			}
 			existing.Endpoints = slice.Endpoints
 			existing.Ports = slice.Ports
@@ -898,12 +913,14 @@ func (r *VoxDiscoveryReconciler) deleteControlledSecret(ctx context.Context, dis
 // SetupWithManager registers VoxDiscoveryReconciler with the controller manager.
 func (r *VoxDiscoveryReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&openvoxv1alpha1.VoxDiscovery{}).
+		For(&openvoxv1alpha1.VoxDiscovery{}, builder.WithPredicates(specOrMetaChanged())).
 		Owns(&corev1.Service{}).
 		Owns(&discoveryv1.EndpointSlice{}).
 		Owns(&corev1.Secret{}).
-		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForCluster)).
-		Watches(&openvoxv1alpha1.VoxNode{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForVoxNode)).
+		Watches(&openvoxv1alpha1.VoxCluster{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForCluster),
+			builder.WithPredicates(voxClusterChangedForDependents())).
+		Watches(&openvoxv1alpha1.VoxNode{}, handler.EnqueueRequestsFromMapFunc(r.discoveriesForVoxNode),
+			builder.WithPredicates(voxNodeChangedForDiscovery())).
 		Complete(r)
 }
 
