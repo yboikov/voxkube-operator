@@ -8,6 +8,22 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Security
+- The CA private key and the `pp_cli_auth` certificate (full CA admin rights) were mounted into every compiler and
+  OpenVox DB pod via `<cluster>-ca-tls`. Compilers and OpenVox DB now get their own certificates without
+  `pp_cli_auth` in `<cluster>-server-tls` and `<cluster>-db-tls` (CA certificate and CRL included, CA key never);
+  only the CA pod mounts `<cluster>-ca-tls` (#27).
+- OpenVox DB accepted any certificate the CA signed, so every agent could read all nodes' facts and catalogs and
+  submit commands. It now has a `certificate-allowlist` (compilers and operator, plus the new
+  `database.certificateAllowlist`) and rejects revoked certificates (`ssl-crl-path`) (#27).
+
+### Changed
+- Each of the CA, compilers and OpenVox DB has a certificate with its own SANs, so changing the compilers' external
+  hostname no longer rolls the CA or OpenVox DB. Upgrading rolls the CA, compilers and OpenVox DB once (#27).
+
+### Added
+- `VoxCluster.spec.database.certificateAllowlist` (#27).
+
 ### Fixed
 - VoxDiscovery reconciled in a loop (about once a second, querying OpenVox DB each time) because writing its own
   `lastSyncTime` re-triggered it; it now runs every `syncInterval` and on spec, label or annotation changes (#29).

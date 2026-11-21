@@ -427,7 +427,7 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 
 	podAnnotations := map[string]string{
 		AnnotationConfigHash: hashStrings(srvCM.Data),
-		AnnotationTLSHash:    st.tlsHash,
+		AnnotationTLSHash:    st.serverTLSHash,
 	}
 	for k, v := range plan.podAnnotations {
 		if v != "" {
@@ -438,7 +438,8 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 	srvConfigMode := int32(0o755)
 	codeVol := plan.codeVolume
 	volumes := []corev1.Volume{
-		{Name: "ca-tls", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: st.caSecretName}}},
+		// The compilers' own certificate, CA certificate and CRL: never the CA key (<cluster>-ca-tls).
+		{Name: "tls", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: serverSecretName(cluster)}}},
 		{Name: "server-config", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
 			LocalObjectReference: corev1.LocalObjectReference{Name: srvCMName},
 			DefaultMode:          &srvConfigMode,
@@ -457,7 +458,7 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 		return corev1.VolumeMount{Name: "server-config", MountPath: path, SubPath: file, ReadOnly: true}
 	}
 	volumeMounts := []corev1.VolumeMount{
-		{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
+		{Name: "tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
 		sub("webserver.conf", "/etc/puppetlabs/puppetserver/conf.d/webserver.conf"),
 		sub("puppetserver.conf", "/etc/puppetlabs/puppetserver/conf.d/puppetserver.conf"),
 		sub("ca.cfg", "/etc/puppetlabs/puppetserver/services.d/ca.cfg"),
@@ -485,7 +486,7 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 	}
 
 	initMounts := []corev1.VolumeMount{
-		{Name: "ca-tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
+		{Name: "tls", MountPath: "/etc/puppetlabs/puppet/ssl-certs", ReadOnly: true},
 		sub("bootstrap-server.sh", "/etc/puppetlabs/puppet/bootstrap-server.sh"),
 		{Name: "puppetserver-cache", MountPath: "/var/cache/puppetlabs"},
 	}

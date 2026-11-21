@@ -68,7 +68,9 @@ type VoxClusterReconciler struct {
 // clusterState collects what one reconcile observed; it is turned into VoxCluster status.
 type clusterState struct {
 	caSecretName      string
-	tlsHash           string
+	tlsHash           string // CA endpoint certificate (<cluster>-ca-tls)
+	serverTLSHash     string // compiler certificate (<cluster>-server-tls)
+	dbTLSHash         string // OpenVox DB certificate (<cluster>-db-tls)
 	caURL             string
 	caEnabled         bool
 	caReady           bool
@@ -165,6 +167,19 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 					logger.Info("VoxNode auto-creation failed; will retry", "reason", err.Error())
 				}
 			}
+		}
+	}
+
+	// 3b. Workload certificates for compilers and OpenVox DB (no CA key, no pp_cli_auth), carrying the CRL
+	// synced above.
+	if st.serverTLSHash, err = r.reconcileWorkloadTLS(ctx, cluster, "server", serverSecretName(cluster),
+		serviceCertname(cluster), serverDNSNames(cluster)); err != nil {
+		return fmt.Errorf("reconciling compiler TLS Secret: %w", err)
+	}
+	if databaseEnabled(cluster) {
+		if st.dbTLSHash, err = r.reconcileWorkloadTLS(ctx, cluster, "db", dbSecretName(cluster),
+			dbCertname(cluster), dbDNSNames(cluster)); err != nil {
+			return fmt.Errorf("reconciling OpenVox DB TLS Secret: %w", err)
 		}
 	}
 

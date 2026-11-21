@@ -425,7 +425,7 @@ spec:
 - **Same-namespace references.** `clusterRef`, every Secret name, and every `SecretKeySelector` are resolved in the namespace of the referencing object. Cross-namespace references are not supported.
 - **Durations.** `code.git.pollInterval` and `VoxDiscovery.spec.syncInterval` use Go durations (`30s`, `5m`, `1h`). An invalid value falls back to the default. `ca.ttl` also accepts `d` (days) and `y` (365 days). PuppetDB housekeeping TTLs (`7d`, `14d`) use PuppetDB's format and are written verbatim to `database.ini`. cert-manager `duration` / `renewBefore` use cert-manager's format (`2160h`).
 - **Reconcile cadence.** A `VoxCluster` is reconciled on every change to its spec, to owned objects, to any Secret or `VoxNode` in its namespace, and at least every 60 s (every 15 s while not `Running`, or every `pollInterval` if that is shorter). Setting a new value on the annotation `voxkube.io/sync-now` forces an immediate reconcile, including a Git poll.
-- **Rollouts.** Configuration files mounted via `subPath` can't update in place, so every pod template carries `voxkube.io/config-hash` (and `voxkube.io/tls-hash` for pods serving the service certificate). A changed file or a renewed certificate therefore rolls the affected pods.
+- **Rollouts.** Configuration files mounted via `subPath` can't update in place, so every pod template carries `voxkube.io/config-hash` (and `voxkube.io/tls-hash` with a hash of the pod's own certificate). A changed file or a renewed certificate therefore rolls the affected pods.
 
 > [!IMPORTANT]
 > **Production checklist**
@@ -491,7 +491,7 @@ The operator mints an installation token (`POST {apiBaseURL}/app/installations/{
 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
-| `enabled` | bool | `true` | – | `false` skips the CA StatefulSet, Service and PVC (use an external CA). The `<cluster>-ca-tls` Secret is still generated for the compilers and DB, and `VoxNode` treats nodes as signed. |
+| `enabled` | bool | `true` | – | `false` skips the CA StatefulSet, Service and PVC (use an external CA). The `<cluster>-ca-tls` Secret is still generated (it signs the compiler and DB certificates), and `VoxNode` treats nodes as signed. |
 | `storageSize` | quantity | `2Gi` | – | Size of PVC `<cluster>-ca-data` (applied at creation). |
 | `storageClassName` | string | – | – | StorageClass for the CA PVC (applied at creation). |
 | `ttl` | string | `10y` | – | Validity of the CA certificate, applied when the CA is first generated. |
@@ -541,6 +541,7 @@ Defaults (with no override): `runAsNonRoot: true`, `seccompProfile: RuntimeDefau
 | `replicas` | int32 | `1` | ≥ 1 | Replicas of Deployment `<cluster>-db`. |
 | `postgres` | [`ClusterPostgresSpec`](#voxclusterspecdatabasepostgres) | – | – | Database backend. |
 | `housekeeping` | [`DatabaseHousekeepingSpec`](#voxclusterspecdatabasehousekeeping) | – | – | Written to `database.ini`. |
+| `certificateAllowlist` | []string | – | certnames | Extra certificate CNs allowed to use the OpenVox DB API (e.g. a reporting tool). The compilers and the operator are always allowed; agents aren't. |
 
 #### `VoxCluster.spec.database.postgres`
 
@@ -625,7 +626,7 @@ networking:
 | `openShiftRoute.host` | string | `externalHostname` | – | Route host (also added as a SAN). |
 | `openShiftRoute.annotations` | map[string]string | – | – | Annotations on the Route. |
 
-The CA and the compilers share one service certificate. It covers `<cluster>`, `<cluster>-ca` and `<cluster>-db` in every in-cluster form (`name`, `name.ns`, `name.ns.svc`, `name.ns.svc.cluster.local`), plus every hostname from **both** blocks. It is re-issued automatically when this list changes, and the pods roll.
+The CA, the compilers and OpenVox DB each have their own certificate. The compiler certificate covers `<cluster>` in every in-cluster form (`name`, `name.ns`, `name.ns.svc`, `name.ns.svc.cluster.local`) plus the hostnames of the `server` block; the CA certificate covers `<cluster>-ca` plus the `ca` block; the DB certificate covers `<cluster>-db`. A certificate is re-issued automatically when its list changes, and only the pods using it roll.
 
 The compilers run with the CA service disabled, and a passthrough Route can't route by path, so the CA needs its own hostname. Agent configuration for the example above (Routes listen on 443):
 
@@ -687,7 +688,9 @@ Switching a component off deletes its objects (only those the `VoxCluster` contr
 
 | Kind | Name | Notes |
 |---|---|---|
-| Secret (`kubernetes.io/tls`) | `<c>-ca-tls` | **Retained.** `ca.crt`, `ca.key`, `ca.pub` (CA, generated once), `crl.pem` (synced from the CA every reconcile), `tls.crt`, `tls.key`, `tls.pub`: service certificate `CN=<c>.<ns>.svc`, valid 1 year, re-issued 30 days before expiry or when SANs change. It carries the Puppet `pp_cli_auth` extension, which the operator needs for the CA admin API. |
+| Secret (`kubernetes.io/tls`) | `<c>-ca-tls` | **Retained.** `ca.crt`, `ca.key`, `ca.pub` (CA, generated once), `crl.pem` (synced from the CA every reconcile), `tls.crt`, `tls.key`, `tls.pub`: the CA endpoint's certificate `CN=<c>.<ns>.svc`, valid 1 year, re-issued 30 days before expiry or when SANs change. It carries the Puppet `pp_cli_auth` extension: the operator uses it as its client certificate for the CA admin API and OpenVox DB. **Mounted only into the CA pod.** |
+| Secret (`kubernetes.io/tls`) | `<c>-server-tls` | Compiler certificate (`CN=<c>.<ns>.svc`, **no** `pp_cli_auth`), `ca.crt` and `crl.pem` copied from `<c>-ca-tls` (never `ca.key`). Mounted into the compilers. |
+| Secret (`kubernetes.io/tls`) | `<c>-db-tls` | OpenVox DB certificate (`CN=<c>-db.<ns>.svc`, no `pp_cli_auth`), `ca.crt`, `crl.pem`. Mounted into OpenVox DB. |
 | PersistentVolumeClaim | `<c>-ca-data` | **Retained.** CA state; reused on restart or restore if `ca_crt.pem` exists. The CA refuses to start (pod log: `FATAL: the CA key on the PVC ... does not match the CA Secret`) when the PVC's CA key differs from the one in `<c>-ca-tls`: restore both from the same backup. |
 | ConfigMap, StatefulSet, Service | `<c>-ca-config`, `<c>-ca` | CA, port `8140`. |
 | ConfigMap | `<c>-g10k` | `git` mode only. |
@@ -695,7 +698,7 @@ Switching a component off deletes its objects (only those the `VoxCluster` contr
 | Secret | `<c>-postgres-credentials` | `builtin` without `credentialsSecretRef`. |
 | ConfigMap, StatefulSet, Service | `<c>-postgres-init`, `<c>-postgres` | `builtin` only. |
 | ConfigMap / Secret | `<c>-db-config` (`jetty.ini`) / `<c>-db-database` (`database.ini`) | – |
-| Deployment, Service | `<c>-db` | Port `8081` (`https`, mTLS). The plain-HTTP listener (`8080`) is bound to `127.0.0.1` inside the pod, for the readiness probe only. |
+| Deployment, Service | `<c>-db` | Port `8081` (`https`, mTLS). The plain-HTTP listener (`8080`) is bound to `127.0.0.1` inside the pod, for the readiness probe only. Over mTLS it accepts only certificates in its allowlist (`<c>.<ns>.svc`, i.e. the compilers and the operator, plus `database.certificateAllowlist`) and rejects revoked ones (`ssl-crl-path`). Agent certificates can't read other nodes' data. |
 | Secret | `<c>-hiera-secrets` | Mounted at `/etc/puppetlabs/puppet/hiera-secrets` (updates live). |
 | ConfigMap | `<c>-enc-nodes` | One `<certname>.yaml` per `VoxNode` that is neither `Decommissioned`, `Revoked` nor being deleted (updates live). |
 | ConfigMap | `<c>-server-config` | `puppet.conf`, `puppetdb.conf`, `routes.yaml`, `enc.sh`, `enc-default.yaml`, `hiera.yaml`, … |
@@ -935,7 +938,7 @@ Rules:
 
 ### OpenVox HTTP APIs used by the operator
 
-All CA and DB calls use mTLS with `ca.crt`, `tls.crt` and `tls.key` from `<cluster>-ca-tls`. The service certificate carries `pp_cli_auth`, which the default `auth.conf` requires for the CA admin endpoints.
+All CA and DB calls use mTLS with `ca.crt`, `tls.crt` and `tls.key` from `<cluster>-ca-tls`. That certificate carries `pp_cli_auth`, which the default `auth.conf` requires for the CA admin endpoints; the compiler and DB certificates don't.
 
 | Purpose | Request |
 |---|---|

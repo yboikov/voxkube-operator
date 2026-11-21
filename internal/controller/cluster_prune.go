@@ -36,6 +36,7 @@ func databaseObjects(c string) []prunedObject {
 		{c + "-db", &corev1.Service{}},
 		{c + "-db-config", &corev1.ConfigMap{}},
 		{c + "-db-database", &corev1.Secret{}},
+		{c + "-db-tls", &corev1.Secret{}},
 	}, builtinPostgresObjects(c)...)
 }
 
