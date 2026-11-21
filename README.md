@@ -1009,6 +1009,18 @@ Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release a
 - Compilers rely on Jetty's CRL reload to pick up `crl.pem` changes (no restart is triggered).
 - In cluster-wide mode the operator caches all Secrets (needed for the label-based Hiera bridge). Use `--watch-namespace` to limit this.
 
+#### Scaling limits
+
+Estimated from the design, not load-tested. A small installation (up to ~100 machines) is far from all of them.
+
+| Limit | Where it starts | What happens | Fix (not implemented yet) |
+|---|---|---|---|
+| **All Hiera secrets live in one Secret**, `<cluster>-hiera-secrets` (node, role and common data, including every cert-manager certificate, key and CA). Kubernetes caps a Secret at 1 MiB. | Roughly **100–150 machines with one certificate each** (≈5–7 KB per certificate). Plain secrets are a few hundred bytes per machine, so without certificates it's thousands. | The operator can't update the Secret any more: new or renewed certificates and changed secrets stop reaching the compilers. | One Secret per node (and per role), mounted together. |
+| **ENC and Hiera are re-rendered for every node on every VoxNode reconcile** (each VoxNode check, every 5 min, rebuilds the data of all nodes). | Noticeable in the high hundreds, a problem in the thousands (work grows with the square of the node count). | Operator CPU and API traffic grow; reconciles slow down. | Render once per change (debounced, cluster-level), not once per node. |
+| **Compiler capacity**: default 2 pods × 2 JRuby instances (`maxActiveInstances`), 1 GiB heap. One JRuby serves about `runinterval / catalog compile time` agents. | ~500–1000 machines with 30-minute runs and 5–15 s catalogs. | Agent runs queue and time out. | Not a design limit: raise `server.replicas` / autoscaling, or `maxActiveInstances` with ~0.5 GiB more heap per JRuby. |
+
+The CA (one pod, signing only at join and renewal), OpenVox DB (one pod, with an adequately sized PostgreSQL) and `VoxDiscovery` (EndpointSlices of 100) are fine into the thousands.
+
 ---
 
 ## Versioning & Releases
