@@ -180,10 +180,18 @@ func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1
 		return ctrl.Result{}, nil
 	}
 	logger := log.FromContext(ctx)
+	clusterLive := clusterFound && cluster.DeletionTimestamp.IsZero()
+	// Drop the node from the ENC and Hiera right away (nodeServedBy skips deleting VoxNodes), whatever the cleanup
+	// does: a machine being deleted must not keep getting catalogs or secrets.
+	if clusterLive {
+		if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 	switch {
 	case node.Annotations[AnnotationSkipCleanup] == "true":
 		logger.Info("skip-cleanup annotation set; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
-	case !clusterFound || !cluster.DeletionTimestamp.IsZero():
+	case !clusterLive:
 		// Nothing left to clean against (or it is being torn down): don't block deletion forever.
 		logger.Info("VoxCluster gone; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
 	default:
@@ -201,9 +209,6 @@ func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1
 			}
 			r.event(node, corev1.EventTypeWarning, "CleanupPending", msg)
 			return ctrl.Result{RequeueAfter: nodeRequeueWaiting}, nil
-		}
-		if err := r.refreshClusterHieraAndENC(ctx, cluster); err != nil {
-			return ctrl.Result{}, err
 		}
 	}
 	controllerutil.RemoveFinalizer(node, VoxNodeFinalizer)
@@ -361,8 +366,13 @@ func (r *VoxNodeReconciler) reconcileActive(
 				seen = true
 			}
 			status.LastReportStatus = pn.LatestReportStatus
-			// OpenVox DB keeps deactivated and expired nodes around; they are not checking in.
+			// OpenVox DB keeps deactivated and expired nodes around; they are not checking in. Keep the last
+			// check-in (so "not reporting" alerts keep firing for a machine that aged out), but not its report
+			// status: when a certname is reused, the old machine's failed run must not show up as the new one's.
 			deactivated = pn.Deactivated != nil || pn.Expired != nil
+			if deactivated {
+				status.LastReportStatus = ""
+			}
 		case !errors.Is(err, ErrNodeNotFound):
 			// Keep the last known check-in: an OpenVox DB outage must not demote an Active node.
 			dbErr = err

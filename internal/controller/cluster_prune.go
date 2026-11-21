@@ -75,6 +75,21 @@ func (r *VoxClusterReconciler) pruneDisabledComponents(ctx context.Context, clus
 	return nil
 }
 
+// serverRolledOut reports whether the compiler Deployment has fully rolled out its current spec: every replica runs
+// the latest template and no old pod remains.
+func (r *VoxClusterReconciler) serverRolledOut(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) bool {
+	d := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: cluster.Name + "-server"}, d); err != nil {
+		return false
+	}
+	want := int32(1)
+	if d.Spec.Replicas != nil {
+		want = *d.Spec.Replicas
+	}
+	return d.Status.ObservedGeneration >= d.Generation &&
+		d.Status.UpdatedReplicas == want && d.Status.Replicas == want
+}
+
 func (r *VoxClusterReconciler) deleteIfControlled(ctx context.Context, owner metav1.Object, name string, obj client.Object) error {
 	if err := r.Get(ctx, types.NamespacedName{Namespace: owner.GetNamespace(), Name: name}, obj); err != nil {
 		if apierrors.IsNotFound(err) {

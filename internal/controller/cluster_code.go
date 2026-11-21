@@ -377,8 +377,8 @@ func (r *VoxClusterReconciler) reconcileGitCode(ctx context.Context, cluster *op
 			plan.reason = codeReasonGitSide
 			plan.message += fmt.Sprintf("Each compiler deploys %s every %s", g.Remote, poll)
 		}
-		// Still report HEAD for visibility when the remote can be polled.
-		if r.GitPoller != nil && IsHTTPRemote(g.Remote) {
+		// Still report HEAD for visibility when the remote can be polled, but never without the credentials.
+		if r.GitPoller != nil && IsHTTPRemote(g.Remote) && !authFailed {
 			if rev, err := r.GitPoller.Resolve(ctx, g.Remote, pollAuth); err == nil {
 				plan.observedCommit = rev.Head
 			}
@@ -512,13 +512,14 @@ func (r *VoxClusterReconciler) reconcileGitHubAppToken(ctx context.Context, clus
 		Data: map[string][]byte{"token": []byte(token), "username": []byte("x-access-token")},
 	}
 	if err := controllerutil.SetControllerReference(cluster, tokenSec, r.Scheme); err != nil {
-		return "", "", err
+		return fail(err)
 	}
 	if !found {
 		if err := r.Create(ctx, tokenSec); err != nil && !apierrors.IsAlreadyExists(err) {
-			return "", "", err
+			return fail(err)
 		}
 	} else {
+		// A failed write (e.g. a 409 conflict) must not unmount the Secret: fail() keeps it, retried next reconcile.
 		existing.Data = tokenSec.Data
 		if existing.Annotations == nil {
 			existing.Annotations = map[string]string{}
@@ -526,7 +527,7 @@ func (r *VoxClusterReconciler) reconcileGitHubAppToken(ctx context.Context, clus
 		existing.Annotations[tokenExpiryAnno] = tokenSec.Annotations[tokenExpiryAnno]
 		existing.Labels = tokenSec.Labels
 		if err := r.Update(ctx, existing); err != nil {
-			return "", "", err
+			return fail(err)
 		}
 	}
 	return token, secName, nil

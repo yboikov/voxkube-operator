@@ -133,11 +133,6 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster, st *clusterState) error {
 	logger := log.FromContext(ctx)
 
-	// 0. Remove what components that were switched off left behind.
-	if err := r.pruneDisabledComponents(ctx, cluster); err != nil {
-		return fmt.Errorf("pruning disabled components: %w", err)
-	}
-
 	// 1. CA key material and the shared service certificate (<cluster>-ca-tls).
 	secName, tlsHash, err := r.reconcileCAPKI(ctx, cluster)
 	if err != nil {
@@ -197,6 +192,14 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 	}
 	if err := r.reconcileNetworking(ctx, cluster, st); err != nil {
 		return fmt.Errorf("reconciling networking: %w", err)
+	}
+
+	// 9. Remove what switched-off components left behind, last and only once the compilers have rolled out
+	// without them, so no compiler pod still mounts (e.g.) a Hiera Secret that is about to disappear.
+	if r.serverRolledOut(ctx, cluster) {
+		if err := r.pruneDisabledComponents(ctx, cluster); err != nil {
+			return fmt.Errorf("pruning disabled components: %w", err)
+		}
 	}
 	return nil
 }

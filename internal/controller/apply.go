@@ -2,6 +2,8 @@ package controller
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -10,6 +12,14 @@ import (
 // cert-manager Certificate, ServiceMonitor). Comparing against it, instead of against the live object, keeps
 // fields the API server or another controller fills in from causing an update on every reconcile.
 const AnnotationAppliedHash = "voxkube.io/applied-hash"
+
+// AnnotationAppliedLabels and AnnotationAppliedAnnotations list the label and annotation keys the operator set last
+// time, so a key removed from the spec (e.g. from openShiftRoute.annotations) is removed from the object, while keys
+// set by others are kept.
+const (
+	AnnotationAppliedLabels      = "voxkube.io/applied-labels"
+	AnnotationAppliedAnnotations = "voxkube.io/applied-annotations"
+)
 
 // appliedHash hashes the parts of desired the operator owns.
 func appliedHash(desired *unstructured.Unstructured) string {
@@ -22,19 +32,54 @@ func appliedHash(desired *unstructured.Unstructured) string {
 	return hashBytes(b)
 }
 
-// stampAppliedHash marks desired with its applied hash before it is created.
+// stampAppliedHash marks desired with its applied hash and owned keys before it is created.
 func stampAppliedHash(desired *unstructured.Unstructured) {
-	h := appliedHash(desired)
-	desired.SetAnnotations(mergeStringMaps(desired.GetAnnotations(), map[string]string{AnnotationAppliedHash: h}))
+	desired.SetAnnotations(mergeStringMaps(desired.GetAnnotations(), appliedBookkeeping(desired)))
+}
+
+// appliedBookkeeping returns the bookkeeping annotations for desired (computed before they are added).
+func appliedBookkeeping(desired *unstructured.Unstructured) map[string]string {
+	return map[string]string{
+		AnnotationAppliedHash:        appliedHash(desired),
+		AnnotationAppliedLabels:      joinKeys(desired.GetLabels()),
+		AnnotationAppliedAnnotations: joinKeys(desired.GetAnnotations()),
+	}
+}
+
+func joinKeys(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// mergeOwned returns live with the keys the operator set last time (previous, comma-separated) removed, overlaid
+// with desired: keys dropped from desired disappear, keys set by others survive.
+func mergeOwned(live, desired map[string]string, previous string) map[string]string {
+	out := make(map[string]string, len(live)+len(desired))
+	for k, v := range live {
+		out[k] = v
+	}
+	if previous != "" {
+		for _, k := range strings.Split(previous, ",") {
+			delete(out, k)
+		}
+	}
+	for k, v := range desired {
+		out[k] = v
+	}
+	return out
 }
 
 // prepareUnstructuredUpdate readies desired to replace existing and reports whether an update is needed.
-// It returns false when existing already carries what desired describes. Otherwise it keeps the labels and
-// annotations other controllers set (ours win on conflicts), keeps a Route's generated spec.host when desired
-// sets none, and copies the resourceVersion.
+// It returns false when existing already carries what desired describes. Otherwise it keeps the labels,
+// annotations and finalizers others set (ours win on conflicts; keys we set before and no longer want are
+// removed), keeps a Route's generated spec.host when desired sets none, and copies the resourceVersion.
 func prepareUnstructuredUpdate(existing, desired *unstructured.Unstructured) bool {
-	h := appliedHash(desired)
-	if existing.GetAnnotations()[AnnotationAppliedHash] == h {
+	bookkeeping := appliedBookkeeping(desired)
+	if existing.GetAnnotations()[AnnotationAppliedHash] == bookkeeping[AnnotationAppliedHash] {
 		return false
 	}
 	if desired.GetKind() == "Route" {
@@ -44,10 +89,19 @@ func prepareUnstructuredUpdate(existing, desired *unstructured.Unstructured) boo
 			}
 		}
 	}
-	desired.SetLabels(mergeStringMaps(existing.GetLabels(), desired.GetLabels()))
-	annotations := mergeStringMaps(existing.GetAnnotations(), desired.GetAnnotations())
-	annotations[AnnotationAppliedHash] = h
-	desired.SetAnnotations(annotations)
+	prev := existing.GetAnnotations()
+	desired.SetLabels(mergeOwned(existing.GetLabels(), desired.GetLabels(), prev[AnnotationAppliedLabels]))
+	desired.SetAnnotations(mergeStringMaps(
+		mergeOwned(existing.GetAnnotations(), desired.GetAnnotations(), prev[AnnotationAppliedAnnotations]), bookkeeping))
+	desired.SetFinalizers(existing.GetFinalizers())
+	owners := desired.GetOwnerReferences()
+	for _, ref := range existing.GetOwnerReferences() {
+		if ref.Controller != nil && *ref.Controller {
+			continue // ours is in desired
+		}
+		owners = append(owners, ref)
+	}
+	desired.SetOwnerReferences(owners)
 	desired.SetResourceVersion(existing.GetResourceVersion())
 	return true
 }

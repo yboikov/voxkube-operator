@@ -836,7 +836,8 @@ func voxDiscoveryLabels(name string) map[string]string {
 }
 
 // removeDiscoveryResources deletes the headless Service, EndpointSlices and ServiceMonitor owned by disc.
-// The scraper TLS Secret is kept so that re-enabling discovery reuses the certificate.
+// The scraper TLS Secret is kept so that re-enabling the database reuses the certificate; it is deleted only when
+// the ServiceMonitor (or its openvoxCA TLS) is switched off.
 func (r *VoxDiscoveryReconciler) removeDiscoveryResources(ctx context.Context, disc *openvoxv1alpha1.VoxDiscovery) error {
 	slices := &discoveryv1.EndpointSliceList{}
 	if err := r.List(ctx, slices, client.InNamespace(disc.Namespace), client.MatchingLabels{
@@ -863,10 +864,7 @@ func (r *VoxDiscoveryReconciler) removeDiscoveryResources(ctx context.Context, d
 		return err
 	}
 
-	if err := r.deleteServiceMonitor(ctx, disc); err != nil {
-		return err
-	}
-	return r.deleteControlledSecret(ctx, disc, fmt.Sprintf("%s-prometheus-scraper-tls", disc.Name))
+	return r.deleteServiceMonitor(ctx, disc)
 }
 
 // deleteServiceMonitor deletes the VoxDiscovery's ServiceMonitor if it exists and is controlled by it.

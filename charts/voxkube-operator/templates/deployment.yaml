@@ -44,7 +44,7 @@ spec:
             {{- else }}
             - --metrics-bind-address=0
             {{- end }}
-            - --node-metric-labels={{ join "," .Values.metrics.nodeLabels }}
+            - --node-metric-labels={{ join "," (.Values.metrics.nodeLabels | default (list)) }}
           ports:
             - name: health
               containerPort: 8081

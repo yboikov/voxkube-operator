@@ -58,6 +58,10 @@ Fixes every finding of a full code review of 0.2.6.
 - `trusted.*` fact paths in VoxDiscovery selectors and `endpointLabels` found nothing, because the inventory
   query didn't return trusted data.
 - VoxNodes with an empty `spec.state` (the API default) counted as inactive in the metrics.
+- Labels and annotations the operator set on Routes, Certificates and ServiceMonitors are removed when dropped
+  from the spec; labels, annotations, finalizers and owner references added by others are kept.
+- Components switched off are pruned only after the compilers have rolled out without them.
+- Nodes deactivated in OpenVox DB don't carry the old machine's report status (certname reuse).
 - README examples used `role::webserver` as the role; roles used with role-scoped Hiera secrets must be valid
   label values, so the examples now use `webserver`.
 
