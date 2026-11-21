@@ -52,16 +52,59 @@ func autoCreateVoxNodesEnabled(cluster *openvoxv1alpha1.VoxCluster) bool {
 	return nc == nil || nc.AutoCreateVoxNode == nil || *nc.AutoCreateVoxNode
 }
 
-// pskAutosignScript is Puppet's policy-based autosign executable for autosignMode "psk".
-// Puppet passes the certname as $1 and the CSR PEM on stdin; exit 0 signs the CSR.
-const pskAutosignScript = `#!/bin/sh
-# In-cluster service names are reserved: OpenVox DB trusts the service certname.
-case "$1" in *.svc|*.svc.cluster.local) exit 1 ;; esac
-PSK_FILE=` + pskMountPath + `/psk
-[ -s "$PSK_FILE" ] || exit 1
-expected=$(cat "$PSK_FILE")
-pw=$(openssl req -noout -text 2>/dev/null | sed -n 's/^[[:space:]]*challengePassword[[:space:]]*:[[:space:]]*//p' | head -n 1)
-[ -n "$pw" ] && [ "$pw" = "$expected" ]
+// pskAutosignScript is Puppet's policy-based autosign executable for autosignMode "psk", in Puppet's own Ruby.
+// Puppet passes the certname as ARGV[0] and the CSR PEM on stdin; exit 0 signs the CSR. The CSR is decoded as
+// ASN.1 (no scraping of "openssl req -text"), its signature is checked, and the key is accepted from the
+// challengePassword attribute (csr_attributes.yaml custom_attributes) or the pp_preshared_key extension request
+// (extension_requests), compared in constant time. Any error denies.
+const pskAutosignScript = `#!/opt/puppetlabs/puppet/bin/ruby
+# Rendered by voxkube-operator.
+require 'openssl'
+
+PP_PRESHARED_KEY = '1.3.6.1.4.1.34380.1.1.4'
+
+def offered_keys(csr)
+  keys = []
+  csr.attributes.each do |attr|
+    case attr.oid
+    when 'challengePassword', '1.2.840.113549.1.9.7'
+      attr.value.value.each { |v| keys << v.value.to_s }
+    when 'extReq', 'msExtReq', '1.2.840.113549.1.9.14', '1.3.6.1.4.1.311.2.1.14'
+      attr.value.value.each do |exts|
+        exts.value.each do |ext|
+          parts = ext.value
+          next unless parts.first.oid == PP_PRESHARED_KEY
+          raw = parts.last.value
+          inner = begin
+            OpenSSL::ASN1.decode(raw).value
+          rescue OpenSSL::ASN1::ASN1Error
+            raw
+          end
+          keys << inner.to_s
+        end
+      end
+    end
+  end
+  keys
+end
+
+begin
+  certname = ARGV[0].to_s
+  # In-cluster service names are reserved: OpenVox DB trusts the service certname.
+  exit 1 if certname.empty? || certname.end_with?('.svc') || certname.end_with?('.svc.cluster.local')
+
+  psk_file = '` + pskMountPath + `/psk'
+  expected = File.file?(psk_file) ? File.read(psk_file).strip : ''
+  exit 1 if expected.empty?
+
+  csr = OpenSSL::X509::Request.new($stdin.read)
+  exit 1 unless csr.verify(csr.public_key)
+
+  ok = offered_keys(csr).any? { |k| !k.empty? && OpenSSL.secure_compare(k, expected) }
+  exit(ok ? 0 : 1)
+rescue StandardError
+  exit 1
+end
 `
 
 // reconcileCAWorkload renders the dedicated CA StatefulSet, its config, Service and PVC.
