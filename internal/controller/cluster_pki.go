@@ -249,6 +249,8 @@ func (r *VoxClusterReconciler) reconcileWorkloadTLS(ctx context.Context, cluster
 	}
 	data["ca.crt"] = ca.Data["ca.crt"]
 	data["crl.pem"] = ca.Data["crl.pem"]
+	certExpiry.recordCA(cluster.Namespace, cluster.Name, ca.Data)
+	certExpiry.recordService(cluster.Namespace, cluster.Name, component, data["tls.crt"])
 
 	sec := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: secName, Namespace: cluster.Namespace, Labels: voxClusterLabels(cluster.Name, component)},

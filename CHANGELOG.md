@@ -8,6 +8,16 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Added
+- Certificate expiry metrics: `voxkube_ca_certificate_expiry_timestamp_seconds`,
+  `voxkube_service_certificate_expiry_timestamp_seconds{component=ca|server|db}`,
+  `voxkube_discovery_scraper_certificate_expiry_timestamp_seconds`, `voxkube_crl_next_update_timestamp_seconds` and
+  `voxkube_node_certificate_expiry_timestamp_seconds`, with the new `VoxNode.status.certificateNotAfter` (from the
+  CA's certificate status). Parsed while reconciling and served from memory (#56).
+- `voxkube.io/paused: "true"` on a VoxCluster, VoxNode or VoxDiscovery pauses reconciliation (no changes, no CA or
+  OpenVox DB calls), with a `Paused` condition. A paused VoxCluster pauses its VoxNodes and VoxDiscoveries; a VoxNode
+  deleted while paused waits for unpause unless `voxkube.io/skip-cleanup` is set (#57).
+
 ## [0.3.0]
 
 Production workload controls (#36), Hiera Secret sharding (#37) and large control-repo guidance (#38). No breaking

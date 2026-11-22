@@ -25,6 +25,7 @@ var nodeMetricHelp = map[string]string{
 	metricNodeActive:           "1 if the VoxNode's spec.state is Active, 0 otherwise.",
 	metricNodeLastReportFailed: "1 if the latest Puppet run of an Active node failed, 0 if it succeeded. Absent until the first report.",
 	metricNodeLastSeen:         "Unix time of an Active node's latest report, facts or catalog in OpenVox DB. Absent until the first check-in.",
+	metricNodeCertExpiry:       "Unix time at which an Active node's signed Puppet agent certificate expires, as reported by the OpenVox CA.",
 }
 
 // nodeMetricFixedLabels are on every node metric. The allowlisted VoxNode labels monitoring.voxkube.io/<label>
@@ -97,6 +98,9 @@ func nodeMetricSamples(nodes []openvoxv1alpha1.VoxNode, extraLabels []string) []
 		}
 		if n.Status.LastSeenTime != nil {
 			out = append(out, nodeSample{metricNodeLastSeen, labels, float64(n.Status.LastSeenTime.Unix())})
+		}
+		if n.Status.CertificateNotAfter != nil {
+			out = append(out, nodeSample{metricNodeCertExpiry, labels, float64(n.Status.CertificateNotAfter.Unix())})
 		}
 	}
 	return out

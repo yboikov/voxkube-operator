@@ -67,7 +67,8 @@ func monitoringLabels(labels map[string]string) map[string]string {
 }
 
 // voxClusterChangedForDependents passes the VoxCluster changes VoxNodes and VoxDiscoveries depend on: spec,
-// deletion, and the endpoints/Secret recorded in status. readyReplicas, observedCommit and conditions are dropped.
+// deletion, pausing (voxkube.io/paused cascades to them), and the endpoints/Secret recorded in status.
+// readyReplicas, observedCommit and conditions are dropped.
 func voxClusterChangedForDependents() predicate.Predicate {
 	return predicate.Funcs{UpdateFunc: func(e event.UpdateEvent) bool {
 		o, ok1 := e.ObjectOld.(*openvoxv1alpha1.VoxCluster)
@@ -77,6 +78,7 @@ func voxClusterChangedForDependents() predicate.Predicate {
 		}
 		return o.Generation != n.Generation ||
 			!o.DeletionTimestamp.Equal(n.DeletionTimestamp) ||
+			annotatedPaused(o) != annotatedPaused(n) ||
 			o.Status.CAURL != n.Status.CAURL ||
 			o.Status.DatabaseURL != n.Status.DatabaseURL ||
 			o.Status.ServerURL != n.Status.ServerURL ||

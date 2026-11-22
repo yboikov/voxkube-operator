@@ -32,6 +32,8 @@ type CertStatus struct {
 	Name        string `json:"name"`
 	State       string `json:"state"` // requested | signed | revoked
 	Fingerprint string `json:"fingerprint"`
+	// NotAfter is the certificate's expiry as the CA reports it ("2031-02-23T21:06:52UTC"); empty for CSRs.
+	NotAfter string `json:"not_after,omitempty"`
 }
 
 // OpenVoxCAClient interacts with the OpenVox CA HTTP API.

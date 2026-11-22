@@ -26,12 +26,14 @@ type fakeVoxServer struct {
 	dbDown       bool
 	cleans       int
 	deactivates  int
+	calls        int
 	nodeResponse string
 }
 
 func (f *fakeVoxServer) handler(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	switch {
 	case r.URL.Path == "/puppet-ca/v1/clean":
 		f.cleans++
@@ -48,7 +50,7 @@ func (f *fakeVoxServer) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		_, _ = w.Write([]byte(`{"uuid":"x"}`))
 	case strings.HasPrefix(r.URL.Path, "/puppet-ca/v1/certificate_status/"):
-		_, _ = w.Write([]byte(`{"name":"web01.example.com","state":"signed","fingerprint":"AA:BB"}`))
+		_, _ = w.Write([]byte(`{"name":"web01.example.com","state":"signed","fingerprint":"AA:BB","not_after":"2031-02-23T21:06:52UTC"}`))
 	case strings.HasPrefix(r.URL.Path, "/pdb/query/v4/nodes/") && f.nodeResponse != "":
 		_, _ = w.Write([]byte(f.nodeResponse))
 	default:

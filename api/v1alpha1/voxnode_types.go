@@ -161,6 +161,10 @@ type VoxNodeStatus struct {
 	// +optional
 	CertificateFingerprint string `json:"certificateFingerprint,omitempty"`
 
+	// CertificateNotAfter is when the node's signed Puppet agent certificate expires, as reported by the OpenVox CA.
+	// +optional
+	CertificateNotAfter *metav1.Time `json:"certificateNotAfter,omitempty"`
+
 	// CertificateExtensions are the Puppet extensions of the node's certificate (e.g. pp_role, pp_datacenter),
 	// read from its pending CSR before signing and from the signed certificate afterwards. Registered extensions
 	// appear by name, site-specific ones (1.3.6.1.4.1.34380.1.2.*) by OID. pp_preshared_key is never shown.

@@ -68,6 +68,11 @@ update that section in the same change. Never document a field as working unless
     `<cluster>-hiera-secrets`), so a resize never re-hashes files inside Secrets that running pods mount. Old sets
     are pruned by `pruneHieraShards` only after `serverRolledOut`. File names must stay unique across shards (each
     file goes to exactly one shard); size is the sum of decoded values, as the API server counts it.
+  - Pause (`pause.go`): every reconciler checks `voxkube.io/paused` (own or the VoxCluster's) before any CA/DB call
+    or child write, and only writes the `Paused` condition. New code paths that call the CA or OpenVox DB must sit
+    after that check. A VoxNode's deletion cleanup waits while paused (skip-cleanup excepted).
+  - Certificate expiry metrics (`cert_expiry.go`): record into `certExpiry` where a Secret is already read during
+    reconcile and forget on delete/disable. `Collect()` must never read the API or parse PEM.
   - CA and OpenVox DB mTLS clients come from `mtlsClients` (one per VoxCluster, rebuilt on credential change).
   - A (cluster, certname) is owned by its oldest VoxNode (`certnameOwner`, `servedVoxNodes`). Duplicates never
     sign, revoke, clean or classify, and are deleted without cleanup. `*.svc` certnames are reserved

@@ -273,6 +273,28 @@ kubectl annotate voxnode web-01 -n openvox voxkube.io/skip-cleanup=true
 
 Deleting the whole `VoxCluster` (or its namespace) never blocks on `VoxNode` cleanup.
 
+### Pausing reconciliation
+
+For planned CA or OpenVox DB maintenance, a migration or debugging, set the annotation `voxkube.io/paused: "true"` on a `VoxCluster`, `VoxNode` or `VoxDiscovery`:
+
+```yaml
+metadata:
+  annotations:
+    voxkube.io/paused: "true"
+```
+
+While paused, the operator:
+- changes no child objects (Deployments, Secrets, ENC/Hiera data, EndpointSlices…)
+- makes no CA or OpenVox DB calls
+- doesn't requeue on a timer
+- sets the condition `Paused=True` (reason `AnnotationSet`) and emits one `Paused` event
+
+A paused `VoxCluster` pauses all its `VoxNode`s and `VoxDiscovery`s too (`Paused=True`, reason `ClusterPaused`). Removing the annotation resumes everything at once, applies whatever changed in the meantime, and removes the `Paused` condition.
+
+- **Deleting a `VoxNode` while paused** waits: its cleanup would call the CA and OpenVox DB, so the finalizer is kept until you unpause. `voxkube.io/skip-cleanup: "true"` still releases it at once, without any calls. Deleting a `VoxCluster` or `VoxDiscovery` isn't blocked.
+- **Metrics** keep being exported from the last known status.
+- **With ArgoCD self-heal**, set the annotation in Git: an annotation added with `kubectl annotate` is drift and gets reverted.
+
 ---
 
 ### 4. Exporting PuppetDB Inventory to Prometheus (`VoxDiscovery`)
@@ -706,7 +728,7 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 | `hieraSecrets` | object | `shards`, `secretNames` (the active shard Secrets), `largestShardBytes` (summed decoded values of the fullest shard, which is what the 1 MiB limit counts) and `largestShardPercent`. Absent when the bridge is disabled. |
 | `observedCommit` | string | Control-repo `HEAD` SHA last seen by the operator. |
 | `readyReplicas` | int32 | Ready compiler pods. |
-| `conditions` | []`Condition` | `Ready`, `CAReady`, `DatabaseReady`, `CodeReady` (reasons `GitSynced`, `GitSidecar`, `GitPollFailed`, `GitAuthFailed`, `PersistentVolumeClaim`, `ImageVolume`, `DemoCode`), `ServerReady`. |
+| `conditions` | []`Condition` | `Ready`, `CAReady`, `DatabaseReady`, `CodeReady` (reasons `GitSynced`, `GitSidecar`, `GitPollFailed`, `GitAuthFailed`, `PersistentVolumeClaim`, `ImageVolume`, `DemoCode`), `ServerReady`, `HieraSecretsCapacity` (`WithinLimit`, `NearLimit`, `OverLimit`), `Paused` (only while paused, see [Pausing reconciliation](#pausing-reconciliation)). |
 
 #### Resources created per `VoxCluster` `<c>`
 
@@ -841,13 +863,14 @@ Hiera keys in `nodes_<certname>.yaml` (all wrapped in `Sensitive`; call `.unwrap
 | `phase` | string | See the state machine. |
 | `certificateSigned` | bool | CA state is `signed` (always `true` with `ca.enabled: false`). |
 | `certificateFingerprint` | string | Fingerprint reported by the CA. |
+| `certificateNotAfter` | time | Expiry of the signed agent certificate, reported by the CA. Exported as `voxkube_node_certificate_expiry_timestamp_seconds`. |
 | `certificateExtensions` | map[string]string | Puppet extensions of the pending CSR, then of the signed certificate (re-read when the fingerprint changes), e.g. `pp_role`, `pp_datacenter`. Registered extensions by name, site-specific ones (`1.3.6.1.4.1.34380.1.2.*`) by OID. `pp_preshared_key` is never shown. |
 | `role` | string | Effective role: `spec.classification.role`, else `certificateExtensions.pp_role`. Passed to Puppet as `$role`. |
 | `caCleaned` / `puppetDBDeactivated` | bool | `true` once that cleanup step succeeded (`Decommissioned` or deletion); reset to `false` when the node is active, pending or revoked again. |
 | `readyCertificates` | int32 | Requested certificates whose Secret has `tls.crt` and `tls.key`. |
 | `lastReportStatus` | string | `latest_report_status` from OpenVox DB (`changed`, `unchanged`, `failed`). |
 | `lastSeenTime` | timestamp | Latest of the report, facts and catalog timestamps in OpenVox DB. |
-| `conditions` | []`Condition` | `Ready`. |
+| `conditions` | []`Condition` | `Ready`, `Paused` (only while paused). |
 
 ---
 
@@ -936,7 +959,7 @@ All of these are owned by the `VoxDiscovery` and labelled `app.kubernetes.io/nam
 | `serviceName` | string | `<vd>` |
 | `scraperSecretName` | string | TLS Secret used by the ServiceMonitor, if any. |
 | `lastSyncTime` | timestamp | Last successful sync. |
-| `conditions` | []`Condition` | `Ready` (`Synced`, `QueryFailed`, `ClusterNotFound`, `DatabaseDisabled`, `InvalidLabels`). |
+| `conditions` | []`Condition` | `Ready` (`Synced`, `QueryFailed`, `ClusterNotFound`, `DatabaseDisabled`, `InvalidLabels`), `Paused` (only while paused). |
 
 ---
 
@@ -993,8 +1016,31 @@ Served on the operator's metrics endpoint (`:8080/metrics`; chart: `metrics.*`),
 | `voxkube_node_active` | `1` if `spec.state` is `Active` (or empty, the API default), else `0` | every VoxNode |
 | `voxkube_node_last_report_failed` | `1` if `status.lastReportStatus` is `failed`, else `0` | `Active` VoxNodes with a report |
 | `voxkube_node_last_seen_timestamp_seconds` | `status.lastSeenTime` as Unix time | `Active` VoxNodes seen in OpenVox DB |
+| `voxkube_node_certificate_expiry_timestamp_seconds` | `status.certificateNotAfter` as Unix time | `Active` VoxNodes with a signed certificate |
 
 Labels: `namespace`, `voxnode`, `certname`, `cluster`, `role` (`status.role`), `state`, plus the VoxNode labels `monitoring.voxkube.io/<label>` listed in `--node-metric-labels` (chart: `metrics.nodeLabels`, default `alerts`), as `<label>`, empty on nodes that lack one. Other monitoring labels are not exported: the label set is fixed so that labelling one VoxNode never changes the identity of every other series. Add the names you route or silence on (e.g. `team`) to the list. The values refresh as often as the VoxNode controller reads OpenVox DB (every 5 min, 30 s while waiting for a first run).
+
+#### Certificate expiry
+
+Parsed while reconciling and kept in memory (a scrape never reads Secrets):
+
+| Metric | Labels | Value |
+|---|---|---|
+| `voxkube_ca_certificate_expiry_timestamp_seconds` | `namespace`, `cluster` | Expiry of the cluster's CA certificate (`spec.ca.ttl`, default 10 years). |
+| `voxkube_service_certificate_expiry_timestamp_seconds` | `namespace`, `cluster`, `component` (`ca`, `server`, `db`) | Expiry of the CA endpoint, compiler and OpenVox DB certificates. The operator renews them 30 days before. |
+| `voxkube_discovery_scraper_certificate_expiry_timestamp_seconds` | `namespace`, `discovery`, `cluster` | Expiry of a `VoxDiscovery`'s operator-minted scraper certificate (`tls.mode: openvoxCA`). |
+| `voxkube_crl_next_update_timestamp_seconds` | `namespace`, `cluster` | `nextUpdate` of the cluster's current CRL. |
+
+Example alerts (the chart ships no rules; add them to your own PrometheusRule):
+
+```promql
+# CA certificate expires within 180 days: plan the rotation
+(voxkube_ca_certificate_expiry_timestamp_seconds - time()) < 180 * 86400
+# A service certificate is within 7 days of expiry: renewal (due at 30 days) is stuck
+(voxkube_service_certificate_expiry_timestamp_seconds - time()) < 7 * 86400
+# An agent certificate expires within 30 days
+(voxkube_node_certificate_expiry_timestamp_seconds{alerts!="false"} - time()) < 30 * 86400
+```
 
 ### Operator command-line flags
 
