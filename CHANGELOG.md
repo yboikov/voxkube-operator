@@ -8,6 +8,20 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.3.0]
+
+Production workload controls (#36), Hiera Secret sharding (#37) and large control-repo guidance (#38). No breaking
+changes: every new field defaults to the previous behaviour. Verified end to end on v0.3.0-rc.1.
+
+**Upgrade notes:**
+- Apply the 0.3.0 CRDs before upgrading the operator (README → "Applying a new release"). Coming from 0.2.5 or
+  earlier, follow README → "From 0.2.5 or earlier to 0.3.x" first.
+- The operator's ClusterRole gains `policy/poddisruptionbudgets`; upgrading the chart applies it.
+- The CA, compiler and OpenVox DB pods roll once (new startup and liveness probes, compiler anti-affinity).
+- With two or more compilers a PodDisruptionBudget `<cluster>-server` (`maxUnavailable: 1`) is created; node
+  drains then evict one compiler at a time. Set `server.podDisruptionBudget.enabled: false` to opt out.
+- Hiera is unchanged: `hieraSecrets.shards` defaults to 1, which keeps `<cluster>-hiera-secrets`.
+
 ### Added
 - `spec.ca.javaArgs`/`resources` and `spec.database.javaArgs`/`resources` (#36).
 - `spec.database.softWriteFailure` (default `false`) for `puppetdb.conf` on the compilers (#36).
