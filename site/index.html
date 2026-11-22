@@ -43,6 +43,7 @@
         <a href="api.html">Browse the API</a>
         <a href="https://github.com/yboikov/voxkube-operator">Source on GitHub</a>
       </div>
+      <p class="status">API <code>v1alpha1</code>: minor releases may still change it, always with upgrade notes. Every release candidate runs an end-to-end test on a live cluster before it ships.</p>
     </div>
     <figure class="manifest" aria-label="Example VoxCluster manifest with links to each field's reference">
       <figcaption class="manifest-head"><span>voxcluster.yaml</span><span>Point at a field to read its spec</span></figcaption>
@@ -87,6 +88,43 @@ spec:
         enabled: true</pre>
       <div class="peek" id="peek" aria-live="polite"></div>
     </figure>
+  </section>
+
+  <section class="section" aria-labelledby="h-handles">
+    <h2 id="h-handles">What it takes care of</h2>
+    <p class="intro">The parts of running Puppet that usually live in runbooks. Each links to the fields that control it.</p>
+    <div class="jobs">
+      <div class="job">
+        <h3>Certificates</h3>
+        <p>Runs the Puppet CA and approves machines your way: one by one through a <code>VoxNode</code>, with a pre-shared key, or by hand. Revocations reach the compilers through the synced CRL, and every certificate's expiry is a metric.</p>
+        <ul class="fields"><li><a href="api.html#VoxCluster.spec.ca.autosignMode">ca.autosignMode</a></li><li><a href="api.html#VoxCluster.spec.ca.ttl">ca.ttl</a></li><li><a href="api.html#VoxNode.status.certificateNotAfter">certificateNotAfter</a></li></ul>
+      </div>
+      <div class="job">
+        <h3>Code</h3>
+        <p>Deploys your control repo with g10k: every branch, or only the ones you list, becomes an environment. It signs in as a GitHub App, with an SSH key or a token, and polls instead of waiting for a webhook. Or ship code as an immutable OCI image.</p>
+        <ul class="fields"><li><a href="api.html#VoxCluster.spec.code.mode">code.mode</a></li><li><a href="api.html#VoxCluster.spec.code.git.branches">code.git.branches</a></li><li><a href="api.html#VoxCluster.spec.code.git.authType">code.git.authType</a></li></ul>
+      </div>
+      <div class="job">
+        <h3>Secrets</h3>
+        <p>Secrets from External Secrets Operator, or any Secret, become Hiera data for all machines, a role or one machine, always marked <code>Sensitive</code>. Certificates from cert-manager reach machines the same way. No eyaml keys to hand around.</p>
+        <ul class="fields"><li><a href="api.html#VoxCluster.spec.hieraSecrets">hieraSecrets</a></li><li><a href="api.html#VoxNode.spec.certificates">certificates</a></li><li><a href="api.html#VoxNode.spec.secrets">secrets</a></li></ul>
+      </div>
+      <div class="job">
+        <h3>Scale and uptime</h3>
+        <p>Stateless compilers scale with a HorizontalPodAutoscaler, spread across nodes and keep a PodDisruptionBudget for drains. Probes give a cold JVM time to start. Hiera data is split across Secrets when it outgrows 1&nbsp;MiB.</p>
+        <ul class="fields"><li><a href="api.html#VoxCluster.spec.server.autoscaling">server.autoscaling</a></li><li><a href="api.html#VoxCluster.spec.placement">placement</a></li><li><a href="api.html#VoxCluster.spec.hieraSecrets.shards">hieraSecrets.shards</a></li></ul>
+      </div>
+      <div class="job">
+        <h3>Monitoring</h3>
+        <p>Machines found in OpenVox DB become Prometheus targets, labelled with their Puppet role. Failed runs, missed check-ins and expiring certificates are operator metrics, ready for your own alert rules.</p>
+        <ul class="fields"><li><a href="api.html#VoxDiscovery.spec.selector">selector</a></li><li><a href="api.html#VoxDiscovery.spec.serviceMonitor">serviceMonitor</a></li><li><a href="docs.html#operator-metrics">metrics</a></li></ul>
+      </div>
+      <div class="job">
+        <h3>Operations</h3>
+        <p>Everything is YAML you keep in Git and sync with Argo CD or Flux. Pods run under OpenShift's <code>restricted-v2</code> without extra permissions. One annotation pauses a cluster during CA or database maintenance.</p>
+        <ul class="fields"><li><a href="docs.html#pausing-reconciliation">voxkube.io/paused</a></li><li><a href="api.html#VoxCluster.spec.placement">placement</a></li><li><a href="docs.html#upgrading">upgrading</a></li></ul>
+      </div>
+    </div>
   </section>
 
   <section class="section" aria-labelledby="h-resources">
