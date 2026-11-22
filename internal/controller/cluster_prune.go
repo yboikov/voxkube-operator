@@ -52,7 +52,7 @@ func caObjects(c string) []prunedObject {
 
 // pruneDisabledComponents deletes what a component left behind after it was switched off: OpenVox DB
 // (database.enabled=false), the built-in PostgreSQL (postgres.mode external), the CA workload (ca.enabled=false)
-// and the Hiera Secret (hieraSecrets.enabled=false). Only objects controlled by this VoxCluster are deleted.
+// and Hiera Secrets that are not in the active shard set (all of them with hieraSecrets.enabled=false). Only objects controlled by this VoxCluster are deleted.
 func (r *VoxClusterReconciler) pruneDisabledComponents(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) error {
 	c := cluster.Name
 	var prune []prunedObject
@@ -71,15 +71,14 @@ func (r *VoxClusterReconciler) pruneDisabledComponents(ctx context.Context, clus
 	} else if a := cluster.Spec.Code.Git.AuthType; a != "" && a != "githubApp" {
 		prune = append(prune, prunedObject{c + "-g10k-git-token", &corev1.Secret{}})
 	}
-	if cluster.Spec.HieraSecrets.Enabled != nil && !*cluster.Spec.HieraSecrets.Enabled {
-		prune = append(prune, prunedObject{c + "-hiera-secrets", &corev1.Secret{}})
-	}
 	for _, p := range prune {
 		if err := r.deleteIfControlled(ctx, cluster, p.name, p.obj); err != nil {
 			return err
 		}
 	}
-	return nil
+	// Hiera Secrets outside the active shard set: all of them with the bridge disabled, otherwise the set of a
+	// previous spec.hieraSecrets.shards.
+	return r.pruneHieraShards(ctx, cluster)
 }
 
 // serverRolledOut reports whether the compiler Deployment has fully rolled out its current spec: every replica runs

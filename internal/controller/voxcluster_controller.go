@@ -51,6 +51,7 @@ const (
 	ConditionDatabaseReady = "DatabaseReady"
 	ConditionCodeReady     = "CodeReady"
 	ConditionServerReady   = "ServerReady"
+	// ConditionHieraSecretsCapacity is defined in hiera_shards.go.
 
 	defaultClusterResync = 60 * time.Second
 )
@@ -79,7 +80,8 @@ type clusterState struct {
 	dbURL             string
 	dbReady           bool
 	dbMessage         string
-	hieraSecretName   string
+	hiera             *hieraLayout // nil when the Hiera Secret Bridge is disabled
+	hieraMeasured     *hieraLayout // sizes from step 0, also when writing failed
 	code              *codePlan
 	serverURL         string
 	serverExternalURL string
@@ -142,7 +144,8 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 	if err := r.reconcileENCConfigMap(ctx, cluster); err != nil {
 		return fmt.Errorf("reconciling ENC ConfigMap: %w", err)
 	}
-	hieraSecretName, hieraErr := r.reconcileHieraBridge(ctx, cluster)
+	hiera, hieraErr := r.reconcileHieraBridge(ctx, cluster)
+	st.hieraMeasured = hiera
 
 	// 1. CA key material and the shared service certificate (<cluster>-ca-tls).
 	secName, tlsHash, err := r.reconcileCAPKI(ctx, cluster)
@@ -199,7 +202,7 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 	if hieraErr != nil {
 		return fmt.Errorf("reconciling Hiera Secret Bridge: %w", hieraErr)
 	}
-	st.hieraSecretName = hieraSecretName
+	st.hiera = hiera
 
 	// 8. Compilers, autoscaling and networking.
 	if err := r.reconcileServerDeployment(ctx, cluster, st); err != nil {
@@ -241,7 +244,19 @@ func (r *VoxClusterReconciler) updateClusterStatus(
 	if recErr == nil {
 		status.CAURL = st.caURL
 		status.DatabaseURL = st.dbURL
-		status.HieraSecretName = st.hieraSecretName
+		status.HieraSecretName = ""
+		status.HieraSecrets = nil
+		if st.hiera != nil {
+			if len(st.hiera.names) == 1 {
+				status.HieraSecretName = st.hiera.names[0]
+			}
+			status.HieraSecrets = &openvoxv1alpha1.HieraSecretsStatus{
+				Shards:              int32(len(st.hiera.names)),
+				SecretNames:         st.hiera.names,
+				LargestShardBytes:   st.hiera.largestBytes,
+				LargestShardPercent: st.hiera.largestPercent(),
+			}
+		}
 		status.ReadyReplicas = st.readyReplicas
 		status.ServerExternalURL = st.serverExternalURL
 		status.CAExternalURL = st.caExternalURL
@@ -262,6 +277,8 @@ func (r *VoxClusterReconciler) updateClusterStatus(
 			Type: t, Status: s, ObservedGeneration: gen, Reason: reason, Message: msg,
 		})
 	}
+
+	r.setHieraCapacity(cluster, status, st.hieraMeasured, setCond)
 
 	switch {
 	case !st.caEnabled:

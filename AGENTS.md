@@ -62,8 +62,12 @@ update that section in the same change. Never document a field as working unless
   - Controllers react only to changes that matter to them (`predicates.go`): never let a status write re-trigger
     its own controller or fan out (a VoxNode check-in must not re-run the VoxCluster stack; VoxDiscovery's
     `lastSyncTime` must not trigger the next sync). Diff before every write (`Update`, `Status().Update`).
-  - The VoxCluster controller is the only writer of `<cluster>-enc-nodes` and `<cluster>-hiera-secrets`. It renders
+  - The VoxCluster controller is the only writer of `<cluster>-enc-nodes` and the Hiera Secrets. It renders
     them first in `reconcileStack`, so VoxNode changes apply even while later steps fail. VoxNodes don't write them.
+  - Hiera sharding (`hiera_shards.go`): the shard count is part of the Secret names (`-s<N>-<i>`; N=1 keeps
+    `<cluster>-hiera-secrets`), so a resize never re-hashes files inside Secrets that running pods mount. Old sets
+    are pruned by `pruneHieraShards` only after `serverRolledOut`. File names must stay unique across shards (each
+    file goes to exactly one shard); size is the sum of decoded values, as the API server counts it.
   - CA and OpenVox DB mTLS clients come from `mtlsClients` (one per VoxCluster, rebuilt on credential change).
   - A (cluster, certname) is owned by its oldest VoxNode (`certnameOwner`, `servedVoxNodes`). Duplicates never
     sign, revoke, clean or classify, and are deleted without cleanup. `*.svc` certnames are reserved
@@ -140,14 +144,7 @@ update that section in the same change. Never document a field as working unless
 - `sslMode: verify-*` for external PostgreSQL needs the DB CA in the OpenVox DB JVM trust store; there's no
   field for it yet.
 - Build stages pull `golang` from Docker Hub.
-- **Scaling limits (README → "Scaling limits"); fix these before an installation grows past ~100 machines with
-  certificates:**
-  - `<cluster>-hiera-secrets` is a single Secret holding all node, role and common Hiera data, including
-    cert-manager certificates (≈5–7 KB each), so it hits the 1 MiB Secret limit at roughly 100–150 machines with a
-    certificate each. Fix: one Secret per node (`<cluster>-hiera-node-<hash of certname>`) and per role, mounted
-    into the compilers through a projected volume (or rendered into a single emptyDir by an init/sidecar), keeping
-    the `nodes_<certname>.yaml` / `roles_<role>.yaml` / `common.yaml` file names so `hiera.yaml` doesn't change.
-    Watch the pod spec size: a projected volume with hundreds of sources is fine, thousands are not.
+- **Scaling limits (README → "Scaling limits"):**
   - Every VoxNode reconcile calls the cluster-wide ENC/Hiera refresh, so total work per 5 minutes is O(N²). Fix:
     move rendering to one debounced, cluster-level step triggered by VoxNode/Secret changes (e.g. enqueue the
     VoxCluster and render there), and keep VoxNode reconciles to CA/OpenVox DB status only.

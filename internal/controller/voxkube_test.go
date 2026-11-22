@@ -425,6 +425,21 @@ func TestHieraBridge_MultiCertAndESOSensitiveRendering(t *testing.T) {
 			t.Errorf("expected nodes_web01.example.com.yaml to contain %q, got:\n%s", expected, nodeYAML)
 		}
 	}
+
+	// flatCertificateKeys: false keeps each certificate once, in openvox::certs.
+	noFlat := false
+	cluster.Spec.HieraSecrets.FlatCertificateKeys = &noFlat
+	bundle, err = RenderHieraSecretsBundle(ctx, k8sClient, cluster, []openvoxv1alpha1.VoxNode{node})
+	if err != nil {
+		t.Fatalf("RenderHieraSecretsBundle failed: %v", err)
+	}
+	nodeYAML = string(bundle["nodes_web01.example.com.yaml"])
+	if strings.Contains(nodeYAML, "certs::public_web::") || strings.Contains(nodeYAML, "certs::internal_api::") {
+		t.Errorf("flatCertificateKeys=false must omit the flat certs:: keys:\n%s", nodeYAML)
+	}
+	if !strings.Contains(nodeYAML, "openvox::certs:") || !strings.Contains(nodeYAML, "/etc/nginx/ssl/public.crt") {
+		t.Errorf("openvox::certs must stay with flatCertificateKeys=false:\n%s", nodeYAML)
+	}
 }
 
 func TestVoxNodeReconciler_SignENCAndAtomicDecommission(t *testing.T) {

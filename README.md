@@ -670,9 +670,11 @@ ca_port    = 443
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | bool | `true` | `false` stops rendering `<cluster>-hiera-secrets` and doesn't mount it into compilers. |
+| `enabled` | bool | `true` | `false` stops rendering the Hiera Secrets and doesn't mount them into compilers. |
 | `labelSelector` | map[string]string | `voxkube.io/hiera-secret: "true"` | Secrets whose labels contain **all** of these pairs are injected. When set, it **replaces** the default selector. |
 | `commonSecrets` | []string | – | Secret names whose keys go into `common.yaml`, labelled or not. Missing Secrets are skipped. |
+| `shards` | int32 | `1` | Number of Secrets the rendered Hiera files are spread over (1–32), because Kubernetes caps a Secret at 1 MiB. `1` writes `<cluster>-hiera-secrets`; more write `<cluster>-hiera-secrets-s<N>-<0..N-1>`, merged into the same directory on the compilers through a projected volume. Node files are placed by a hash of the certname, role files by role name, and `common.yaml` is always in shard 0. Raise it when `status.hieraSecrets.largestShardPercent` approaches 100 (the `HieraSecretsCapacity` condition turns `False` at 80%). Changing it writes the new set next to the old one, rolls the compilers once, and deletes the old set after the rollout. |
+| `flatCertificateKeys` | bool | `true` | Also write each VoxNode certificate as flat `certs::<name>::tls_crt` / `tls_key` / `ca_crt` keys next to the `openvox::certs` hash. `false` stores every certificate once (roughly halving its size); use it when your code only reads `openvox::certs`. |
 
 See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and file layout.
 
@@ -700,7 +702,8 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 | `serverExternalURL` / `caExternalURL` | string | URL for agents outside the Kubernetes cluster, derived from `networking.server` / `networking.ca`: `https://<route host>:443` with a Route, `https://<externalHostname>:<node port>` for `NodePort`, otherwise `https://<externalHostname>:8140`. Empty when the endpoint has no external hostname. |
 | `databaseURL` | string | `https://<cluster>-db.<ns>.svc.cluster.local:8081` (mTLS), or empty if the database is disabled. |
 | `caSecretName` | string | `<cluster>-ca-tls` |
-| `hieraSecretName` | string | `<cluster>-hiera-secrets`, or empty if disabled. |
+| `hieraSecretName` | string | `<cluster>-hiera-secrets` with one shard; empty with more shards (see `hieraSecrets.secretNames`) or when the bridge is disabled. |
+| `hieraSecrets` | object | `shards`, `secretNames` (the active shard Secrets), `largestShardBytes` (summed decoded values of the fullest shard, which is what the 1 MiB limit counts) and `largestShardPercent`. Absent when the bridge is disabled. |
 | `observedCommit` | string | Control-repo `HEAD` SHA last seen by the operator. |
 | `readyReplicas` | int32 | Ready compiler pods. |
 | `conditions` | []`Condition` | `Ready`, `CAReady`, `DatabaseReady`, `CodeReady` (reasons `GitSynced`, `GitSidecar`, `GitPollFailed`, `GitAuthFailed`, `PersistentVolumeClaim`, `ImageVolume`, `DemoCode`), `ServerReady`. |
@@ -709,7 +712,7 @@ See [Hiera Secret Bridge contract](#hiera-secret-bridge-contract) for scopes and
 
 All of these are labelled `app.kubernetes.io/name=voxkube`, `app.kubernetes.io/instance=<c>`, `app.kubernetes.io/component=<component>` and `app.kubernetes.io/managed-by=voxkube-operator`. They are owned by the `VoxCluster` (garbage-collected with it) **except the CA Secret and the CA PVC**.
 
-Switching a component off deletes its objects (only those the `VoxCluster` controls): `database.enabled: false` removes `<c>-db*` and the built-in PostgreSQL, `postgres.mode: external` removes the built-in PostgreSQL (including its generated credentials), `ca.enabled: false` removes the CA StatefulSet, Service and config, and `hieraSecrets.enabled: false` removes `<c>-hiera-secrets`. This happens at the end of a successful reconcile, once the compiler Deployment has fully rolled out without the component. The CA Secret and the CA PVC are never deleted.
+Switching a component off deletes its objects (only those the `VoxCluster` controls): `database.enabled: false` removes `<c>-db*` and the built-in PostgreSQL, `postgres.mode: external` removes the built-in PostgreSQL (including its generated credentials), `ca.enabled: false` removes the CA StatefulSet, Service and config, `hieraSecrets.enabled: false` removes the Hiera Secrets, and a changed `hieraSecrets.shards` removes the previous shard set. This happens at the end of a successful reconcile, once the compiler Deployment has fully rolled out without the component. The CA Secret and the CA PVC are never deleted.
 
 | Kind | Name | Notes |
 |---|---|---|
@@ -724,7 +727,7 @@ Switching a component off deletes its objects (only those the `VoxCluster` contr
 | ConfigMap, StatefulSet, Service | `<c>-postgres-init`, `<c>-postgres` | `builtin` only. |
 | ConfigMap / Secret | `<c>-db-config` (`jetty.ini`) / `<c>-db-database` (`database.ini`) | – |
 | Deployment, Service | `<c>-db` | Port `8081` (`https`, mTLS). The plain-HTTP listener (`8080`) is bound to `127.0.0.1` inside the pod, for the readiness probe only. Over mTLS it accepts only certificates in its allowlist (`<c>.<ns>.svc`, i.e. the compilers and the operator, plus `database.certificateAllowlist`) and rejects revoked ones (`ssl-crl-path`). Agent certificates can't read other nodes' data. |
-| Secret | `<c>-hiera-secrets` | Mounted at `/etc/puppetlabs/puppet/hiera-secrets` (updates live). |
+| Secret | `<c>-hiera-secrets`, or `<c>-hiera-secrets-s<N>-<i>` with `hieraSecrets.shards` N > 1 | Mounted at `/etc/puppetlabs/puppet/hiera-secrets` (updates live). |
 | ConfigMap | `<c>-enc-nodes` | One `<certname>.yaml` per `VoxNode` that is neither `Decommissioned`, `Revoked` nor being deleted (updates live). |
 | ConfigMap | `<c>-server-config` | `puppet.conf`, `puppetdb.conf`, `routes.yaml`, `enc.sh`, `enc-default.yaml`, `hiera.yaml`, … |
 | Deployment, Service | `<c>-server`, `<c>` | Compilers, port `8140`. |
@@ -1043,9 +1046,9 @@ Renovate (`renovate.json`) opens one grouped PR when a new OpenVox 8.x release a
 
 Estimated from the design, not load-tested. A small installation (up to ~100 machines) is far from all of them.
 
-| Limit | Where it starts | What happens | Fix (not implemented yet) |
+| Limit | Where it starts | What happens | Fix |
 |---|---|---|---|
-| **All Hiera secrets live in one Secret**, `<cluster>-hiera-secrets` (node, role and common data, including every cert-manager certificate, key and CA). Kubernetes caps a Secret at 1 MiB. | Roughly **100–150 machines with one certificate each** (≈5–7 KB per certificate). Plain secrets are a few hundred bytes per machine, so without certificates it's thousands. | The operator can't update the Secret any more: new or renewed certificates and changed secrets stop reaching the compilers. | One Secret per node (and per role), mounted together. |
+| **Hiera Secret size**: node, role and common data, including every cert-manager certificate, key and CA, live in `hieraSecrets.shards` Secrets (default 1). Kubernetes caps each at 1 MiB. | With one shard, roughly **100–150 machines with one certificate each** (≈5–7 KB per certificate, about half with `flatCertificateKeys: false`). Plain secrets are a few hundred bytes per machine, so without certificates it's thousands. | `HieraSecretsCapacity` turns `False` with a Warning event at 80%. Over 100% the operator refuses to write (the previous data stays mounted) and the `Ready` condition says to raise `shards`. | Raise `spec.hieraSecrets.shards` (up to 32, so ~3,000+ machines with a certificate each). |
 | **ENC and Hiera are re-rendered for every node on every VoxNode reconcile** (each VoxNode check, every 5 min, rebuilds the data of all nodes). | Noticeable in the high hundreds, a problem in the thousands (work grows with the square of the node count). | Operator CPU and API traffic grow; reconciles slow down. | Render once per change (debounced, cluster-level), not once per node. |
 | **Compiler capacity**: default 2 pods × 2 JRuby instances (`maxActiveInstances`), 1 GiB heap. One JRuby serves about `runinterval / catalog compile time` agents. | ~500–1000 machines with 30-minute runs and 5–15 s catalogs. | Agent runs queue and time out. | Not a design limit: raise `server.replicas` / autoscaling, or `maxActiveInstances` with ~0.5 GiB more heap per JRuby. |
 

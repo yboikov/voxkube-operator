@@ -17,6 +17,14 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
   replicas; switch off with `podDisruptionBudget.enabled: false` (#36).
 - `spec.placement`: `nodeSelector`, `tolerations`, `affinity` and `imagePullSecrets` for all VoxCluster pods.
   Compilers prefer different nodes by default (soft pod anti-affinity) (#36).
+- `spec.hieraSecrets.shards` (default 1, up to 32) spreads the Hiera data over several Secrets, merged on the
+  compilers through a projected volume, so installations with many certificates stay under the 1 MiB Secret
+  limit. A resize writes the new set before the compilers roll and deletes the old one afterwards (#37).
+- `spec.hieraSecrets.flatCertificateKeys` (default `true`): `false` drops the duplicate `certs::<name>::*` keys
+  and keeps only `openvox::certs` (#37).
+- `status.hieraSecrets` (shard names and fill level) and the `HieraSecretsCapacity` condition, `False` with a
+  Warning event at 80% of the limit. A shard over 1 MiB now fails the reconcile before anything is written,
+  with a message naming `spec.hieraSecrets.shards` (#37).
 - README: upgrade guide from 0.2.5 or earlier, and why `mode: imageVolume` suits large control-repos (#38).
 
 ## [0.2.9]

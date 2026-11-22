@@ -432,6 +432,40 @@ type HieraSecretsSpec struct {
 	// CommonSecrets lists explicit Secret names whose keys are injected into common.yaml.
 	// +optional
 	CommonSecrets []string `json:"commonSecrets,omitempty"`
+
+	// Shards splits the rendered Hiera data over this many Secrets (each limited to 1 MiB by Kubernetes), merged
+	// into one directory on the compilers. 1 keeps a single Secret named <cluster>-hiera-secrets. Raise it when
+	// status.hieraSecrets.largestShardPercent approaches 100; changing it rolls the compilers once.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=32
+	// +kubebuilder:default=1
+	Shards int32 `json:"shards,omitempty"`
+
+	// FlatCertificateKeys also writes every VoxNode certificate as flat certs::<name>::tls_crt, tls_key and ca_crt
+	// keys next to the openvox::certs hash. false stores each certificate once, halving its size.
+	// +kubebuilder:default=true
+	FlatCertificateKeys *bool `json:"flatCertificateKeys,omitempty"`
+}
+
+// HieraSecretsStatus reports the rendered Hiera Secrets.
+type HieraSecretsStatus struct {
+	// Shards is the number of Secrets the Hiera data is split over.
+	// +optional
+	Shards int32 `json:"shards,omitempty"`
+
+	// SecretNames are the active shard Secrets, in shard order.
+	// +optional
+	SecretNames []string `json:"secretNames,omitempty"`
+
+	// LargestShardBytes is the data size of the fullest shard (the sum of its decoded values, which is what the
+	// 1 MiB Secret limit applies to).
+	// +optional
+	LargestShardBytes int64 `json:"largestShardBytes,omitempty"`
+
+	// LargestShardPercent is LargestShardBytes as a percentage of the 1 MiB limit. Above 80 the condition
+	// HieraSecretsCapacity turns False.
+	// +optional
+	LargestShardPercent int32 `json:"largestShardPercent,omitempty"`
 }
 
 // ClusterWorkflowsSpec configures standard enterprise Puppet operational workflows.
@@ -575,9 +609,14 @@ type VoxClusterStatus struct {
 	// +optional
 	CASecretName string `json:"caSecretName,omitempty"`
 
-	// HieraSecretName is the name of the rendered Hiera Secret mounted into compilers.
+	// HieraSecretName is the name of the rendered Hiera Secret mounted into compilers when there is a single shard
+	// (spec.hieraSecrets.shards 1); empty with more shards (see hieraSecrets.secretNames).
 	// +optional
 	HieraSecretName string `json:"hieraSecretName,omitempty"`
+
+	// HieraSecrets reports the shard layout and how full the rendered Hiera Secrets are.
+	// +optional
+	HieraSecrets *HieraSecretsStatus `json:"hieraSecrets,omitempty"`
 
 	// ObservedCommit is the HEAD commit SHA of the control-repo last observed by the operator's Git poller.
 	// +optional
