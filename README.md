@@ -10,7 +10,7 @@
 
 ## What is VoxKube?
 
-VoxKube runs your Puppet infrastructure on Kubernetes or OpenShift. It uses [OpenVox](https://voxpupuli.org/openvox/), the community fork of Puppet 8, and is driven entirely by YAML.
+VoxKube runs your Puppet infrastructure on Kubernetes or OpenShift. It uses [OpenVox](https://voxpupuli.org/openvox/), the community-maintained, open-source fork of Puppet, and is driven entirely by YAML.
 
 Traditionally, a Puppet server lives on hand-built VMs. You sign each new machine's certificate by hand on the CA, keep machine roles in a separate tool such as Foreman, scatter secrets across encrypted Hiera files, and maintain a separate list of machines for monitoring. VoxKube replaces all of that with three Kubernetes resources. You describe the Puppet server, the machines it manages and what to monitor; the operator builds and runs everything, and keeps it that way. Approving a new machine, giving it a role, handing it a TLS certificate, muting its alerts or retiring it is a change to one YAML file, so it all fits into Git and ArgoCD like the rest of your cluster.
 

@@ -6,7 +6,7 @@ other agents that support `AGENTS.md`.
 ## What this is
 
 A Kubernetes/OpenShift operator (Go, controller-runtime, kubebuilder markers) that runs OpenVox (open-source
-Puppet 8): CA, compilers, OpenVox DB (PuppetDB), the Hiera Secret Bridge, the ENC and Prometheus discovery.
+Puppet; pinned to 8.x, see rule 8): CA, compilers, OpenVox DB (PuppetDB), the Hiera Secret Bridge, the ENC and Prometheus discovery.
 API group `voxkube.io/v1alpha1`, with kinds `VoxCluster`, `VoxNode` and `VoxDiscovery`.
 
 **The source of truth for behaviour is the "API Reference" section of `README.md`.** It documents every field,
