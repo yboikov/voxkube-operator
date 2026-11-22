@@ -138,6 +138,14 @@ type ClusterCASpec struct {
 	// PSKSecretRef names a Secret with key "psk" holding the pre-shared key when autosignMode is "psk".
 	// +optional
 	PSKSecretRef string `json:"pskSecretRef,omitempty"`
+
+	// JavaArgs sets JAVA_ARGS (JVM heap) for the CA. Empty means "-Xms256m -Xmx384m".
+	// +optional
+	JavaArgs string `json:"javaArgs,omitempty"`
+
+	// Resources specifies CPU and memory requests/limits for the CA pod.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ClusterServerSpec configures the OpenVox Server catalog compilers.
@@ -178,6 +186,39 @@ type ClusterServerSpec struct {
 	// By default RunAsUser, RunAsGroup, and FSGroup are nil for 100% OpenShift restricted-v2 SCC compliance.
 	// +optional
 	SecurityContext *PodSecurityContextSpec `json:"securityContext,omitempty"`
+
+	// PodDisruptionBudget controls the compilers' PodDisruptionBudget (maxUnavailable 1), created whenever at least
+	// two compilers run, so node drains never take all of them down at once.
+	// +optional
+	PodDisruptionBudget *PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
+}
+
+// PodDisruptionBudgetSpec toggles the PodDisruptionBudget the operator creates for a multi-replica component.
+type PodDisruptionBudgetSpec struct {
+	// Enabled creates a PodDisruptionBudget with maxUnavailable 1 when the component runs two or more replicas.
+	// +kubebuilder:default=true
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// PodPlacementSpec controls where VoxCluster pods run and how their images are pulled. It applies to the CA,
+// the compilers, OpenVox DB and the built-in PostgreSQL.
+type PodPlacementSpec struct {
+	// NodeSelector constrains the pods to nodes with these labels (e.g. OpenShift infra nodes).
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations let the pods run on tainted nodes.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Affinity replaces the operator's default scheduling rules. Without it, compilers prefer to run on different
+	// nodes (soft pod anti-affinity).
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// ImagePullSecrets are added to every pod, for images in a private registry.
+	// +optional
+	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 }
 
 // PodSecurityContextSpec overrides the pod-level security context defaults.
@@ -251,6 +292,25 @@ type ClusterDatabaseSpec struct {
 	// CertificateAllowlist lists additional certnames (certificate CNs) allowed to use the OpenVox DB API over mTLS, e.g. a reporting tool. The compilers and the operator are always allowed; agent certificates are not.
 	// +optional
 	CertificateAllowlist []string `json:"certificateAllowlist,omitempty"`
+
+	// JavaArgs sets JAVA_ARGS (JVM heap) for OpenVox DB. Empty keeps the image default ("-Xms256m -Xmx512m").
+	// +optional
+	JavaArgs string `json:"javaArgs,omitempty"`
+
+	// Resources specifies CPU and memory requests/limits for OpenVox DB pods.
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// SoftWriteFailure lets agent runs succeed when the compilers can't store facts, catalogs or reports in
+	// OpenVox DB (e.g. during a restart or a PostgreSQL failover); the data is then lost for that run. Queries
+	// (puppetdb_query, exported resources) still need OpenVox DB. Written to puppetdb.conf on the compilers.
+	// +kubebuilder:default=false
+	SoftWriteFailure bool `json:"softWriteFailure,omitempty"`
+
+	// PodDisruptionBudget controls OpenVox DB's PodDisruptionBudget (maxUnavailable 1), created only when
+	// replicas is at least 2 (with one replica it would block node drains).
+	// +optional
+	PodDisruptionBudget *PodDisruptionBudgetSpec `json:"podDisruptionBudget,omitempty"`
 }
 
 // ClusterPostgresSpec configures PostgreSQL for OpenVox DB.
@@ -475,6 +535,10 @@ type VoxClusterSpec struct {
 	// Workflows configures ENC, facts, report forwarding, and maintenance windows.
 	// +optional
 	Workflows ClusterWorkflowsSpec `json:"workflows,omitempty"`
+
+	// Placement sets node selection, tolerations, affinity and image pull secrets for all VoxCluster pods.
+	// +optional
+	Placement PodPlacementSpec `json:"placement,omitempty"`
 }
 
 // VoxClusterStatus defines the observed state of a VoxCluster.

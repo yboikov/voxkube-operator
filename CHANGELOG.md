@@ -8,6 +8,17 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Added
+- `spec.ca.javaArgs`/`resources` and `spec.database.javaArgs`/`resources` (#36).
+- `spec.database.softWriteFailure` (default `false`) for `puppetdb.conf` on the compilers (#36).
+- Startup and liveness probes on the CA, compilers and OpenVox DB (5-minute startup budget, liveness restarts only
+  after 2 minutes of failures) (#36).
+- PodDisruptionBudgets (`maxUnavailable: 1`) for the compilers and OpenVox DB whenever they run at least two
+  replicas; switch off with `podDisruptionBudget.enabled: false` (#36).
+- `spec.placement`: `nodeSelector`, `tolerations`, `affinity` and `imagePullSecrets` for all VoxCluster pods.
+  Compilers prefer different nodes by default (soft pod anti-affinity) (#36).
+- README: upgrade guide from 0.2.5 or earlier, and why `mode: imageVolume` suits large control-repos (#38).
+
 ## [0.2.9]
 
 Git branch selection and PSK autosign hardening (#46, #39). No breaking changes.

@@ -400,7 +400,8 @@ func (r *VoxClusterReconciler) reconcileServerDeployment(ctx context.Context, cl
 	caCfg := `puppetlabs.services.ca.certificate-authority-disabled-service/certificate-authority-disabled-service
 puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-watch-service
 `
-	puppetdbConf := fmt.Sprintf("[main]\nserver_urls = https://%s-db.%s.svc:8081\nsoft_write_failure = false\n", cluster.Name, cluster.Namespace)
+	puppetdbConf := fmt.Sprintf("[main]\nserver_urls = https://%s-db.%s.svc:8081\nsoft_write_failure = %t\n",
+		cluster.Name, cluster.Namespace, cluster.Spec.Database.SoftWriteFailure)
 
 	srvCMName := fmt.Sprintf("%s-server-config", cluster.Name)
 	srvCM := &corev1.ConfigMap{
@@ -533,11 +534,17 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 			},
 		},
 	}
+	withProbes(&deploy.Spec.Template.Spec.Containers[0])
+	applyPlacement(&deploy.Spec.Template.Spec, cluster, compilerAntiAffinity(cluster))
 	if err := controllerutil.SetControllerReference(cluster, deploy, r.Scheme); err != nil {
 		return err
 	}
 	if err := r.createOrUpdateDeployment(ctx, deploy); err != nil {
 		return err
+	}
+	if err := r.reconcilePDB(ctx, cluster, "server", compilerMinReplicas(cluster, replicas),
+		pdbEnabled(cluster.Spec.Server.PodDisruptionBudget)); err != nil {
+		return fmt.Errorf("reconciling compiler PodDisruptionBudget: %w", err)
 	}
 
 	st.desiredReplicas = replicas
@@ -747,4 +754,15 @@ func (r *VoxClusterReconciler) endpointExternalURL(ctx context.Context, cluster 
 		}
 	}
 	return fmt.Sprintf("https://%s:%d", ep.ExternalHostname, port)
+}
+
+// compilerMinReplicas is the lowest number of compilers that will run: the HPA minimum when autoscaling, else replicas.
+func compilerMinReplicas(cluster *openvoxv1alpha1.VoxCluster, replicas int32) int32 {
+	if a := cluster.Spec.Server.Autoscaling; a != nil && a.Enabled {
+		if a.MinReplicas != nil {
+			return *a.MinReplicas
+		}
+		return 1
+	}
+	return replicas
 }

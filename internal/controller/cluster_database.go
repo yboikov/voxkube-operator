@@ -228,6 +228,7 @@ certificate-allowlist = /etc/puppetlabs/puppetdb/certificate-allowlist
 							{Name: "https", ContainerPort: 8081, Protocol: corev1.ProtocolTCP},
 						},
 						ReadinessProbe: localStatusProbe(8080),
+						Resources:      cluster.Spec.Database.Resources,
 						VolumeMounts: []corev1.VolumeMount{
 							{Name: "db-database", MountPath: "/etc/puppetlabs/puppetdb/conf.d/database.ini", SubPath: "database.ini", ReadOnly: true},
 							{Name: "db-config", MountPath: "/etc/puppetlabs/puppetdb/conf.d/jetty.ini", SubPath: "jetty.ini", ReadOnly: true},
@@ -247,11 +248,19 @@ certificate-allowlist = /etc/puppetlabs/puppetdb/certificate-allowlist
 			},
 		},
 	}
+	if ja := cluster.Spec.Database.JavaArgs; ja != "" {
+		dbDeploy.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "JAVA_ARGS", Value: ja}}
+	}
+	withProbes(&dbDeploy.Spec.Template.Spec.Containers[0])
+	applyPlacement(&dbDeploy.Spec.Template.Spec, cluster, nil)
 	if err := controllerutil.SetControllerReference(cluster, dbDeploy, r.Scheme); err != nil {
 		return err
 	}
 	if err := r.createOrUpdateDeployment(ctx, dbDeploy); err != nil {
 		return err
+	}
+	if err := r.reconcilePDB(ctx, cluster, "db", dbReplicas, pdbEnabled(cluster.Spec.Database.PodDisruptionBudget)); err != nil {
+		return fmt.Errorf("reconciling OpenVox DB PodDisruptionBudget: %w", err)
 	}
 
 	dbSvc := &corev1.Service{
@@ -355,6 +364,7 @@ func (r *VoxClusterReconciler) reconcileBuiltinPostgres(ctx context.Context, clu
 	if err := controllerutil.SetControllerReference(cluster, sts, r.Scheme); err != nil {
 		return "", false, err
 	}
+	applyPlacement(&sts.Spec.Template.Spec, cluster, nil)
 	if err := r.createOrUpdateStatefulSet(ctx, sts); err != nil {
 		return "", false, err
 	}
