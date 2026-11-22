@@ -96,7 +96,7 @@ From a release (recommended; the chart pins the matching operator image):
 
 ```bash
 helm upgrade --install voxkube-operator oci://ghcr.io/yboikov/charts/voxkube-operator \
-  --version 0.2.9 \
+  --version 0.3.0 \
   --namespace openvox \
   --create-namespace
 ```
