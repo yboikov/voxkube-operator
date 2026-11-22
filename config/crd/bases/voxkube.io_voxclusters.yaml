@@ -504,12 +504,28 @@ spec:
                     description: Enabled activates the Hiera Secret & Certificate
                       Bridge.
                     type: boolean
+                  flatCertificateKeys:
+                    default: true
+                    description: |-
+                      FlatCertificateKeys also writes every VoxNode certificate as flat certs::<name>::tls_crt, tls_key and ca_crt
+                      keys next to the openvox::certs hash. false stores each certificate once, halving its size.
+                    type: boolean
                   labelSelector:
                     additionalProperties:
                       type: string
                     description: LabelSelector matches Secrets in the namespace to
                       inject into Hiera (defaults to voxkube.io/hiera-secret=true).
                     type: object
+                  shards:
+                    default: 1
+                    description: |-
+                      Shards splits the rendered Hiera data over this many Secrets (each limited to 1 MiB by Kubernetes), merged
+                      into one directory on the compilers. 1 keeps a single Secret named <cluster>-hiera-secrets. Raise it when
+                      status.hieraSecrets.largestShardPercent approaches 100; changing it rolls the compilers once.
+                    format: int32
+                    maximum: 32
+                    minimum: 1
+                    type: integer
                 type: object
               networking:
                 description: Networking configures external Services, DNS SANs, and
@@ -1921,9 +1937,38 @@ spec:
                 description: DatabaseURL is the internal URL of OpenVox DB (PuppetDB).
                 type: string
               hieraSecretName:
-                description: HieraSecretName is the name of the rendered Hiera Secret
-                  mounted into compilers.
+                description: |-
+                  HieraSecretName is the name of the rendered Hiera Secret mounted into compilers when there is a single shard
+                  (spec.hieraSecrets.shards 1); empty with more shards (see hieraSecrets.secretNames).
                 type: string
+              hieraSecrets:
+                description: HieraSecrets reports the shard layout and how full the
+                  rendered Hiera Secrets are.
+                properties:
+                  largestShardBytes:
+                    description: |-
+                      LargestShardBytes is the data size of the fullest shard (the sum of its decoded values, which is what the
+                      1 MiB Secret limit applies to).
+                    format: int64
+                    type: integer
+                  largestShardPercent:
+                    description: |-
+                      LargestShardPercent is LargestShardBytes as a percentage of the 1 MiB limit. Above 80 the condition
+                      HieraSecretsCapacity turns False.
+                    format: int32
+                    type: integer
+                  secretNames:
+                    description: SecretNames are the active shard Secrets, in shard
+                      order.
+                    items:
+                      type: string
+                    type: array
+                  shards:
+                    description: Shards is the number of Secrets the Hiera data is
+                      split over.
+                    format: int32
+                    type: integer
+                type: object
               observedCommit:
                 description: ObservedCommit is the HEAD commit SHA of the control-repo
                   last observed by the operator's Git poller.

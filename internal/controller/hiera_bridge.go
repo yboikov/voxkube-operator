@@ -149,11 +149,13 @@ func RenderHieraSecretsBundle(
 				}
 				certsMap[certReq.Name] = certEntry
 
-				// Also inject flat Hiera keys for direct lookup('certs::<name>::tls_crt')
-				nodeData[certname][fmt.Sprintf("certs::%s::tls_crt", certReq.Name)] = tlsCrt
-				nodeData[certname][fmt.Sprintf("certs::%s::tls_key", certReq.Name)] = tlsKey
-				if caCrt != "" {
-					nodeData[certname][fmt.Sprintf("certs::%s::ca_crt", certReq.Name)] = caCrt
+				// Also inject flat Hiera keys for direct lookup('certs::<name>::tls_crt'), unless switched off.
+				if f := cluster.Spec.HieraSecrets.FlatCertificateKeys; f == nil || *f {
+					nodeData[certname][fmt.Sprintf("certs::%s::tls_crt", certReq.Name)] = tlsCrt
+					nodeData[certname][fmt.Sprintf("certs::%s::tls_key", certReq.Name)] = tlsKey
+					if caCrt != "" {
+						nodeData[certname][fmt.Sprintf("certs::%s::ca_crt", certReq.Name)] = caCrt
+					}
 				}
 			}
 			if len(certsMap) > 0 {

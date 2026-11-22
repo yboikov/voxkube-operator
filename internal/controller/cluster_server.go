@@ -289,38 +289,24 @@ fi
 `, certname)
 }
 
-func (r *VoxClusterReconciler) reconcileHieraBridge(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (string, error) {
-	secName := fmt.Sprintf("%s-hiera-secrets", cluster.Name)
+// reconcileHieraBridge renders the Hiera data and writes it as the active shard set. It returns nil when the bridge
+// is disabled; on a size error the layout still carries the measured sizes for status.
+func (r *VoxClusterReconciler) reconcileHieraBridge(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) (*hieraLayout, error) {
 	if cluster.Spec.HieraSecrets.Enabled != nil && !*cluster.Spec.HieraSecrets.Enabled {
-		return "", nil
+		return nil, nil
 	}
 
 	nodeList := &openvoxv1alpha1.VoxNodeList{}
 	if err := r.List(ctx, nodeList, client.InNamespace(cluster.Namespace)); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	bundle, err := RenderHieraSecretsBundle(ctx, r.Client, cluster, nodeList.Items)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	sec := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      secName,
-			Namespace: cluster.Namespace,
-			Labels:    voxClusterLabels(cluster.Name, "hiera-secrets"),
-		},
-		Type: corev1.SecretTypeOpaque,
-		Data: bundle,
-	}
-	if err := controllerutil.SetControllerReference(cluster, sec, r.Scheme); err != nil {
-		return "", err
-	}
-	if err := r.createOrUpdateSecret(ctx, sec); err != nil {
-		return "", err
-	}
-	return secName, nil
+	layout, err := r.writeHieraShards(ctx, cluster, bundle)
+	return &layout, err
 }
 
 func (r *VoxClusterReconciler) reconcileENCConfigMap(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster) error {
@@ -479,10 +465,8 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 			sub("routes.yaml", "/etc/puppetlabs/puppet/routes.yaml"),
 		)
 	}
-	if st.hieraSecretName != "" {
-		volumes = append(volumes, corev1.Volume{Name: "hiera-secrets", VolumeSource: corev1.VolumeSource{
-			Secret: &corev1.SecretVolumeSource{SecretName: st.hieraSecretName},
-		}})
+	if st.hiera != nil {
+		volumes = append(volumes, hieraSecretsVolume(st.hiera.names))
 		volumeMounts = append(volumeMounts, corev1.VolumeMount{Name: "hiera-secrets", MountPath: "/etc/puppetlabs/puppet/hiera-secrets", ReadOnly: true})
 	}
 
