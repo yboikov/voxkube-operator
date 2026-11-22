@@ -212,11 +212,8 @@ certificate-allowlist = /etc/puppetlabs/puppetdb/certificate-allowlist
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: voxClusterLabels(cluster.Name, "db"),
-					Annotations: map[string]string{
-						AnnotationConfigHash: hashStrings(map[string]string{"jetty.ini": jettyIni, "database.ini": databaseIni,
-							"certificate-allowlist": allowlist}),
-						AnnotationTLSHash: st.dbTLSHash,
-					},
+					Annotations: dbPodAnnotations(cluster, st, hashStrings(map[string]string{"jetty.ini": jettyIni,
+						"database.ini": databaseIni, "certificate-allowlist": allowlist})),
 				},
 				Spec: corev1.PodSpec{
 					SecurityContext: buildOpenShiftPodSecurityContext(cluster.Spec.Server.SecurityContext),
@@ -404,4 +401,16 @@ func dbCertificateAllowlist(cluster *openvoxv1alpha1.VoxCluster) string {
 		}
 	}
 	return strings.Join(names, "\n") + "\n"
+}
+
+// dbPodAnnotations are the OpenVox DB pod annotations. The CRL hash is only there when database.certificateAllowlist
+// admits extra clients: their certificates can be CA-signed and revoked. Otherwise OpenVox DB only accepts the
+// compilers' and the operator's certificates, which the operator issues itself and which are never on the CA's CRL,
+// so a revocation needn't restart (and briefly interrupt) the single OpenVox DB pod.
+func dbPodAnnotations(cluster *openvoxv1alpha1.VoxCluster, st *clusterState, configHash string) map[string]string {
+	a := map[string]string{AnnotationConfigHash: configHash, AnnotationTLSHash: st.dbTLSHash}
+	if len(cluster.Spec.Database.CertificateAllowlist) > 0 {
+		a[AnnotationCRLHash] = st.crlHash
+	}
+	return a
 }

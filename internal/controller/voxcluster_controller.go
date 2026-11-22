@@ -42,6 +42,9 @@ const (
 	AnnotationConfigHash = "voxkube.io/config-hash"
 	// AnnotationTLSHash is a hash of the service certificate; changing it restarts the pods that serve it.
 	AnnotationTLSHash = "voxkube.io/tls-hash"
+	// AnnotationCRLHash is a hash of the CRL mounted into a pod. Jetty reads ssl-crl-path only at startup, so a new
+	// CRL (a revoked certificate) rolls the pods that enforce it.
+	AnnotationCRLHash = "voxkube.io/crl-hash"
 	// AnnotationSpecHash records the hash of the desired spec of operator-managed objects.
 	AnnotationSpecHash = "voxkube.io/spec-hash"
 
@@ -72,6 +75,7 @@ type clusterState struct {
 	tlsHash           string // CA endpoint certificate (<cluster>-ca-tls)
 	serverTLSHash     string // compiler certificate (<cluster>-server-tls)
 	dbTLSHash         string // OpenVox DB certificate (<cluster>-db-tls)
+	crlHash           string // the CA's current CRL, copied into both workload TLS Secrets
 	caURL             string
 	caEnabled         bool
 	caReady           bool
@@ -180,12 +184,12 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 
 	// 3b. Workload certificates for compilers and OpenVox DB (no CA key, no pp_cli_auth), carrying the CRL
 	// synced above.
-	if st.serverTLSHash, err = r.reconcileWorkloadTLS(ctx, cluster, "server", serverSecretName(cluster),
+	if st.serverTLSHash, st.crlHash, err = r.reconcileWorkloadTLS(ctx, cluster, "server", serverSecretName(cluster),
 		serviceCertname(cluster), serverDNSNames(cluster)); err != nil {
 		return fmt.Errorf("reconciling compiler TLS Secret: %w", err)
 	}
 	if databaseEnabled(cluster) {
-		if st.dbTLSHash, err = r.reconcileWorkloadTLS(ctx, cluster, "db", dbSecretName(cluster),
+		if st.dbTLSHash, _, err = r.reconcileWorkloadTLS(ctx, cluster, "db", dbSecretName(cluster),
 			dbCertname(cluster), dbDNSNames(cluster)); err != nil {
 			return fmt.Errorf("reconciling OpenVox DB TLS Secret: %w", err)
 		}
