@@ -78,6 +78,10 @@ update that section in the same change. Never document a field as working unless
   - `code.git.branches` must be applied identically in three places: the operator poll (`SelectBranches`), g10k
     (`filter_regex`, matched against the bare branch name) and `deploy.sh` (`git ls-remote` with `refs/heads/<b>`).
     With no branches, `RefsHash` must stay byte-for-byte what it was, so upgrades don't roll the compilers.
+  - JVM pods (CA, compilers, OpenVox DB) get readiness, startup and liveness probes via `withProbes`: keep the
+    liveness grace (≥ 2 min) and startup budget (≥ 5 min) generous; a restarted compiler costs more than a slow one.
+  - Every VoxCluster pod spec goes through `applyPlacement`. PodDisruptionBudgets (`reconcilePDB`) exist only for
+    components with two or more replicas; never create one for a single replica (it blocks node drains).
   - The external ENC (`enc.sh`, `externalHttp`) falls back to the default only on HTTP 404. Any other failure
     exits non-zero so the catalog request fails, rather than compiling the wrong classification.
 

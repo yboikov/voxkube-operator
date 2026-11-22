@@ -309,9 +309,10 @@ chmod 0640 "$SSLDIR/private_keys/${CERTNAME}.pem"
 						Image:           img,
 						ImagePullPolicy: cluster.Spec.Server.ImagePullPolicy,
 						SecurityContext: buildRestrictedContainerSecurityContext(),
-						Env:             []corev1.EnvVar{{Name: "JAVA_ARGS", Value: "-Xms256m -Xmx384m"}},
+						Env:             []corev1.EnvVar{{Name: "JAVA_ARGS", Value: caJavaArgs(cluster)}},
 						Ports:           []corev1.ContainerPort{{Name: "puppet-ca", ContainerPort: 8140, Protocol: corev1.ProtocolTCP}},
 						ReadinessProbe:  puppetStatusProbe(8140, corev1.URISchemeHTTPS),
+						Resources:       cluster.Spec.CA.Resources,
 						VolumeMounts:    mounts,
 					}},
 					Volumes: volumes,
@@ -319,6 +320,8 @@ chmod 0640 "$SSLDIR/private_keys/${CERTNAME}.pem"
 			},
 		},
 	}
+	withProbes(&caSTS.Spec.Template.Spec.Containers[0])
+	applyPlacement(&caSTS.Spec.Template.Spec, cluster, nil)
 	if err := controllerutil.SetControllerReference(cluster, caSTS, r.Scheme); err != nil {
 		return err
 	}
@@ -546,4 +549,12 @@ dropsonde: {
     enabled: false
 }
 `, maxActive)
+}
+
+// caJavaArgs is spec.ca.javaArgs or the default CA heap.
+func caJavaArgs(cluster *openvoxv1alpha1.VoxCluster) string {
+	if cluster.Spec.CA.JavaArgs != "" {
+		return cluster.Spec.CA.JavaArgs
+	}
+	return "-Xms256m -Xmx384m"
 }

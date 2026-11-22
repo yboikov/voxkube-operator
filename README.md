@@ -453,6 +453,22 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `networking` | [`ClusterNetworkingSpec`](#voxclusterspecnetworking) | no | Exposure of the compilers (`server`) and the CA (`ca`): hostnames, Service types, OpenShift Routes. |
 | `hieraSecrets` | [`HieraSecretsSpec`](#voxclusterspechierasecrets) | no | Secret to Hiera bridge. |
 | `workflows` | [`ClusterWorkflowsSpec`](#voxclusterspecworkflows) | no | ENC, metadata, reports, maintenance. |
+| `placement` | [`PodPlacementSpec`](#voxclusterspecplacement) | no | Node selection, tolerations, affinity and image pull secrets for all VoxCluster pods. |
+
+#### `VoxCluster.spec.placement`
+
+Applied to the CA, compiler, OpenVox DB and built-in PostgreSQL pods. Changing it rolls them.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `nodeSelector` | map[string]string | – | E.g. `node-role.kubernetes.io/infra: ""` to run on OpenShift infra nodes. |
+| `tolerations` | []Toleration | – | Needed for tainted nodes (e.g. infra nodes with `NoSchedule`). |
+| `affinity` | Affinity | compilers: soft anti-affinity | Replaces the default. Without it, compilers *prefer* different nodes (`kubernetes.io/hostname`, weight 100); other pods get no affinity. |
+| `imagePullSecrets` | []LocalObjectReference | – | Added to every pod, for a private registry or mirror. |
+
+**Probes** (all three JVM pods: CA, compilers, OpenVox DB): readiness as before; a startup probe with the same check allows up to 5 minutes (30 × 10 s) for a cold JVM/JRuby boot; a liveness probe restarts a container only after 2 minutes of failed checks (6 × 20 s), so long compiles and GC pauses don't trigger it.
+
+**PodDisruptionBudgets** (`<c>-server`, `<c>-db`, `maxUnavailable: 1`): created automatically when the component runs at least two replicas (compilers: `replicas`, or `autoscaling.minReplicas` when autoscaling), deleted when it runs one (a PDB on a single replica blocks every node drain). Switch off with `podDisruptionBudget.enabled: false` on `server` or `database`.
 
 #### `VoxCluster.spec.code`
 
@@ -473,7 +489,7 @@ Printer columns: `.status.phase`, `.status.readyReplicas`, `.status.observedComm
 | `githubApp` | [`GitHubAppAuthSpec`](#voxclusterspeccodegitgithubapp) | – | – | For `authType: githubApp`. |
 | `credentialsSecretRef` | string | – | – | `sshKey`: Secret with `ssh-privatekey` and optionally `known_hosts` (without it, host keys are accepted on first use). `httpsToken`: Secret with `token` (plus optional `username`, default `x-access-token`) or with `username` + `password`. |
 | `pollInterval` | duration | `60s` | Go duration (rejected by the API server if invalid), minimum `10s` (shorter values are raised to it) | How often the operator (synchronized mode) or each sidecar (sidecar mode) checks the remote for moved branches. |
-| `synchronizedRollout` | bool | `true` | – | `true`: the operator polls `info/refs` (HTTP(S) remotes only) and rolls all compilers whenever **any branch** moves, so every pod serves the same revision. `false`, or any SSH remote: every compiler runs a `g10k-sync` sidecar that checks the branches (`git ls-remote --heads`) every `pollInterval` and redeploys only when one moved, plus once an hour to pick up Puppetfile modules that track a branch. Each pod does this independently. |
+| `synchronizedRollout` | bool | `true` | – | `true`: the operator polls `info/refs` (HTTP(S) remotes only) and rolls all compilers whenever **any branch** moves, so every pod serves the same revision. `false`, or any SSH remote: every compiler runs a `g10k-sync` sidecar that checks the branches (`git ls-remote --heads`) every `pollInterval` and redeploys only when one moved, plus once an hour to pick up Puppetfile modules that track a branch. Each pod does this independently. g10k updates the code in place; Puppet Server re-reads environments on every compile (its default `environment_timeout` of `0`), so new code is used at once, but a compile that runs during a deploy can read a half-updated module and fail that single run. For large or busy control-repos, prefer `mode: imageVolume` with an image built by your CI: every pod then serves an immutable, complete code tree. |
 | `generateTypes` | bool | `true` | – | Runs `puppet generate types` for every environment after each g10k deployment. |
 
 How it's wired: ConfigMap `<cluster>-g10k` holds `g10k.yaml`, `deploy.sh`, `sidecar.sh` and `askpass.sh`. Compilers get a `g10k-init` init container, plus a `g10k-sync` sidecar in sidecar mode. HTTPS credentials reach git through `GIT_ASKPASS` and never appear in URLs. SSH keys are copied to a private temp file and used via `GIT_SSH_COMMAND`; under OpenShift's random UIDs the script first adds a `/etc/passwd` entry for the UID (the image makes the file group-writable), since OpenSSH refuses to run without one. `deploy.sh` fails (without touching the deployed code) when the remote can't be reached or has no branches, and when g10k leaves `environments/` empty; in that last case it also deletes the g10k cache so the next attempt clones fresh. A failing `g10k-init` is retried by the kubelet, so a compiler only starts with code; a failing sidecar run is retried on the next poll.
@@ -499,6 +515,8 @@ The operator mints an installation token (`POST {apiBaseURL}/app/installations/{
 | `ttl` | string | `10y` | – | Validity of the CA certificate, applied when the CA is first generated. |
 | `autosignMode` | string | `voxnode` | `voxnode` \| `psk` \| `off` \| `true` | `voxnode`: a CSR is signed when its `VoxNode` is `Active`. `off`: nothing is signed automatically (`VoxNode` only reports the state; sign with `puppetserver ca sign`). `true`: the CA signs every CSR (only for isolated networks: anyone who can reach the CA gets a certificate). `psk`: the CA signs CSRs that carry the pre-shared key, either as the `challengePassword` attribute (`csr_attributes.yaml` → `custom_attributes`) or as the `pp_preshared_key` extension request (`extension_requests`). The autosign script runs in Puppet's Ruby: it decodes the CSR as ASN.1, checks its signature and compares in constant time; anything unparsable is denied. |
 | `pskSecretRef` | string | – | required for `psk` (the API server rejects `psk` without it) | Secret with key `psk`. In-cluster service names (`*.svc`) are never autosigned. |
+| `javaArgs` | string | `-Xms256m -Xmx384m` | – | `JAVA_ARGS` of the CA. |
+| `resources` | ResourceRequirements | – | – | CPU/memory requests and limits of the CA pod. |
 
 #### `VoxCluster.spec.server`
 
@@ -512,6 +530,7 @@ The operator mints an installation token (`POST {apiBaseURL}/app/installations/{
 | `resources` | `ResourceRequirements` | – | – | Applied to the `openvox-server` container. Set `requests.cpu` when using autoscaling. |
 | `autoscaling` | [`ServerAutoscalingSpec`](#voxclusterspecserverautoscaling) | – | – | CPU-based HorizontalPodAutoscaler. |
 | `securityContext` | [`PodSecurityContextSpec`](#voxclusterspecserversecuritycontext) | – | – | Pod-level overrides for the CA, compiler, OpenVox DB and built-in PostgreSQL pods. |
+| `podDisruptionBudget.enabled` | bool | `true` | – | Compiler PodDisruptionBudget (`maxUnavailable: 1`) whenever at least two compilers run (see [placement](#voxclusterspecplacement)). |
 
 #### `VoxCluster.spec.server.autoscaling`
 
@@ -544,6 +563,10 @@ Defaults (with no override): `runAsNonRoot: true`, `seccompProfile: RuntimeDefau
 | `postgres` | [`ClusterPostgresSpec`](#voxclusterspecdatabasepostgres) | – | – | Database backend. |
 | `housekeeping` | [`DatabaseHousekeepingSpec`](#voxclusterspecdatabasehousekeeping) | – | – | Written to `database.ini`. |
 | `certificateAllowlist` | []string | – | certnames | Extra certificate CNs allowed to use the OpenVox DB API (e.g. a reporting tool). The compilers and the operator are always allowed; agents aren't. |
+| `javaArgs` | string | image default `-Xms256m -Xmx512m` | – | `JAVA_ARGS` of OpenVox DB. Size the heap to your fleet (PuppetDB's guidance: about 1 GB per 1,000 nodes, at least 512 MB). |
+| `resources` | ResourceRequirements | – | – | CPU/memory requests and limits of OpenVox DB pods. |
+| `softWriteFailure` | bool | `false` | – | Written to `puppetdb.conf` on the compilers. `true`: agent runs succeed while OpenVox DB can't store facts, catalogs or reports (e.g. during a restart or PostgreSQL failover); that run's data is lost. Queries (`puppetdb_query`, exported resources) still need OpenVox DB. |
+| `podDisruptionBudget.enabled` | bool | `true` | – | OpenVox DB PodDisruptionBudget, only when `replicas` ≥ 2. |
 
 #### `VoxCluster.spec.database.postgres`
 
@@ -1063,6 +1086,19 @@ VoxKube uses [SemVer](https://semver.org/). While the API is `v1alpha1`, minor r
 **Registry cleanup.** `.github/workflows/ghcr-cleanup.yaml` runs every Sunday. It keeps `latest`, every tag containing a dot (`0.2.1`, `0.2`, `0.3.0-rc.1`, `8.18.0`, `8.18.0-<sha>`, `8.18.0-<YYYYMMDD>`) and the newest 20 `<sha>`-only tags per image, and deletes the rest, including untagged leftovers (never manifests still referenced by a kept image). Run it from the Actions tab with **dry run** (the default for manual runs) to preview.
 
 ### Upgrading
+
+#### From 0.2.5 or earlier to 0.3.x
+
+Upgrading directly is fine: every migration (new certificate Secrets, renamed Certificates, clean-up of old objects) runs idempotently on the first reconcile, whichever version you come from. Before upgrading, check:
+
+1. **Metric labels (0.2.7).** `voxkube_node_*` keep only `alerts` from the `monitoring.voxkube.io/*` labels (plus the fixed ones). Add any other label your alerts or dashboards use to `metrics.nodeLabels` in the chart values.
+2. **Other clients of OpenVox DB (0.2.7, 0.2.8).** Plain HTTP (8080) is gone, and mTLS only admits the compilers and the operator. Add the certname of any other tool to `spec.database.certificateAllowlist`. Puppet code (`puppetdb_query`, exported resources) runs on the compilers and is unaffected.
+3. **Validation (0.2.8).** The CRDs reject incomplete settings (see [CHANGELOG.md](CHANGELOG.md)); `certname` must be lowercase and `certname`/`clusterRef` can't be changed. Test with `kubectl apply --dry-run=server -f <your manifests>`.
+4. **Certificate Secret names (0.2.8).** cert-manager Certificates of VoxNodes whose name contains a dot get a new name once (`voxnode-cert-<full-name>-<cert>-<hash>`). Hiera keys don't change. Only something referencing the old Secret names directly needs updating.
+
+What happens: the CA, compilers and OpenVox DB restart once; agents receive re-issued certificates (from item 4) on their next run, so make sure the Puppet code that writes them restarts or reloads the affected services. Afterwards, check that no VoxNode reports `DuplicateCertname`. Optionally set `spec.code.git.branches` to the branches you use as environments.
+
+#### Applying a new release
 
 `helm upgrade` never updates CRDs (Helm only creates them on the first install), so a new schema has to be applied separately and **before** the new operator starts.
 
