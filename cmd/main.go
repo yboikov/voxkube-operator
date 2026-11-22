@@ -102,6 +102,7 @@ func main() {
 		os.Exit(1)
 	}
 	crmetrics.Registry.MustRegister(&controller.NodeMetricsCollector{Reader: mgr.GetClient(), Labels: metricLabels})
+	crmetrics.Registry.MustRegister(controller.PKIMetricsCollector{})
 
 	if err = (&controller.VoxClusterReconciler{
 		Client:         mgr.GetClient(),

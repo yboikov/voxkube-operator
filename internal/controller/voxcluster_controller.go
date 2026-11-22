@@ -107,9 +107,14 @@ func (r *VoxClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if err := r.Get(ctx, req.NamespacedName, cluster); err != nil {
 		if apierrors.IsNotFound(err) {
 			mtlsClients.forget(req.Namespace + "/" + req.Name)
+			certExpiry.forgetCluster(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
+	}
+
+	if annotatedPaused(cluster) {
+		return ctrl.Result{}, r.markClusterPaused(ctx, req.NamespacedName, cluster)
 	}
 
 	st := &clusterState{}
@@ -184,6 +189,8 @@ func (r *VoxClusterReconciler) reconcileStack(ctx context.Context, cluster *open
 			dbCertname(cluster), dbDNSNames(cluster)); err != nil {
 			return fmt.Errorf("reconciling OpenVox DB TLS Secret: %w", err)
 		}
+	} else {
+		certExpiry.dropService(cluster.Namespace, cluster.Name, serviceComponentDatabase)
 	}
 
 	// 4. Puppet code delivery (Git/g10k, PVC, image volume or demo code).
@@ -236,6 +243,7 @@ func (r *VoxClusterReconciler) updateClusterStatus(
 	status := cluster.Status.DeepCopy()
 	gen := cluster.Generation
 	status.ObservedGeneration = gen
+	meta.RemoveStatusCondition(&status.Conditions, ConditionPaused)
 
 	if st.caSecretName != "" {
 		status.CASecretName = st.caSecretName
@@ -577,4 +585,24 @@ func (r *VoxClusterReconciler) clusterForVoxNode(_ context.Context, obj client.O
 		return nil
 	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: n.Namespace, Name: n.Spec.ClusterRef}}}
+}
+
+// markClusterPaused records the Paused condition (written only when it changes) and emits one event when pausing
+// starts. Nothing else is touched; its VoxNodes and VoxDiscoveries pause themselves.
+func (r *VoxClusterReconciler) markClusterPaused(ctx context.Context, key types.NamespacedName, cluster *openvoxv1alpha1.VoxCluster) error {
+	status := cluster.Status.DeepCopy()
+	if setPaused(&status.Conditions, pausedByAnnotation, pausedMessage(pausedByAnnotation, "VoxCluster"), cluster.Generation) {
+		r.event(cluster, corev1.EventTypeNormal, "Paused", "Reconciliation paused ("+AnnotationPaused+"); VoxNodes and VoxDiscoveries of this cluster are paused too")
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &openvoxv1alpha1.VoxCluster{}
+		if err := r.Get(ctx, key, latest); err != nil {
+			return client.IgnoreNotFound(err)
+		}
+		if statusJSONEqual(latest.Status, *status) {
+			return nil
+		}
+		latest.Status = *status
+		return r.Status().Update(ctx, latest)
+	})
 }

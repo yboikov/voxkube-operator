@@ -235,6 +235,11 @@ spec:
                 description: CertificateFingerprint is the SHA256 fingerprint of the
                   signed Puppet agent certificate.
                 type: string
+              certificateNotAfter:
+                description: CertificateNotAfter is when the node's signed Puppet
+                  agent certificate expires, as reported by the OpenVox CA.
+                format: date-time
+                type: string
               certificateSigned:
                 description: CertificateSigned indicates whether the node's Puppet
                   agent CSR has been signed by the OpenVox CA.

@@ -87,10 +87,23 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		duplicateOf = owner.Name
 	}
 
+	// Paused (own annotation or the VoxCluster's): no CA/OpenVox DB calls and no writes beyond the condition.
+	paused := pauseReason(node, cluster, clusterFound)
+
 	// Deletion: clean the CA and OpenVox DB, then release the finalizer. The finalizer stays until both
 	// succeed, unless the VoxCluster is gone (or going), the node is a duplicate or skip-cleanup is set.
+	// While paused the cleanup waits (it would call the CA and OpenVox DB); skip-cleanup still releases at once.
 	if !node.DeletionTimestamp.IsZero() {
+		cleanupNeeded := node.Annotations[AnnotationSkipCleanup] != "true" && duplicateOf == "" &&
+			clusterFound && cluster.DeletionTimestamp.IsZero()
+		if paused != "" && cleanupNeeded && controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
+			return ctrl.Result{}, r.markNodePaused(ctx, node, paused,
+				pausedMessage(paused, "VoxNode")+"; deletion waits for that (or set "+AnnotationSkipCleanup+"=\"true\" to delete without cleanup)")
+		}
 		return r.finalizeVoxNode(ctx, node, cluster, clusterFound, duplicateOf)
+	}
+	if paused != "" {
+		return ctrl.Result{}, r.markNodePaused(ctx, node, paused, pausedMessage(paused, "VoxNode"))
 	}
 
 	if !controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
@@ -101,6 +114,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	status := node.Status.DeepCopy()
+	meta.RemoveStatusCondition(&status.Conditions, ConditionPaused)
 	setReady := func(ok bool, reason, msg string) {
 		s := metav1.ConditionFalse
 		if ok {
@@ -331,6 +345,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 		case errors.Is(err, ErrCertNotFound):
 			status.CertificateSigned = false
 			status.CertificateFingerprint = ""
+			status.CertificateNotAfter = nil
 			status.CertificateExtensions = nil
 			waitingReason, waitingMsg = "AwaitingCSR", "No CSR from "+node.Spec.Certname+" yet; run 'puppet ssl bootstrap' (or 'puppet agent -t') on the node"
 			requeue = nodeRequeueWaiting
@@ -340,6 +355,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 			requeue = nodeRequeueWaiting
 		case cs.State == "revoked":
 			status.CertificateSigned = false
+			status.CertificateNotAfter = nil
 			status.Phase = openvoxv1alpha1.NodePhaseError
 			setReady(false, "CertificateRevokedOnCA",
 				"The certificate is revoked on the CA. Set state Decommissioned (or delete and re-create the VoxNode) and let the agent submit a new CSR")
@@ -357,6 +373,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 			} else {
 				status.CertificateSigned = signed.State == "signed"
 				status.CertificateFingerprint = signed.Fingerprint
+				status.CertificateNotAfter = caNotAfter(signed.NotAfter, status.CertificateNotAfter)
 				r.event(node, corev1.EventTypeNormal, "CertificateSigned", "Signed CSR for "+node.Spec.Certname)
 				r.refreshCertificateExtensions(ctx, cluster, node, status, true)
 			}
@@ -367,6 +384,7 @@ func (r *VoxNodeReconciler) reconcileActive(
 			}
 			status.CertificateSigned = true
 			status.CertificateFingerprint = cs.Fingerprint
+			status.CertificateNotAfter = caNotAfter(cs.NotAfter, status.CertificateNotAfter)
 		}
 	}
 
@@ -756,4 +774,30 @@ func servedVoxNodes(nodes []openvoxv1alpha1.VoxNode, cluster *openvoxv1alpha1.Vo
 func reservedCertname(cluster *openvoxv1alpha1.VoxCluster, certname string) bool {
 	return certname == serviceCertname(cluster) || certname == dbCertname(cluster) ||
 		strings.HasSuffix(certname, ".svc") || strings.HasSuffix(certname, ".svc.cluster.local")
+}
+
+// caNotAfter converts a CA not_after into status, keeping prev when it is unchanged (no status churn) and nil when
+// the CA didn't report one.
+func caNotAfter(s string, prev *metav1.Time) *metav1.Time {
+	t, ok := parseCATime(s)
+	if !ok {
+		return nil
+	}
+	if prev != nil && prev.Time.Equal(t) {
+		return prev
+	}
+	mt := metav1.NewTime(t)
+	return &mt
+}
+
+// markNodePaused records the Paused condition (only when it changes) and emits one event when pausing starts.
+func (r *VoxNodeReconciler) markNodePaused(ctx context.Context, node *openvoxv1alpha1.VoxNode, reason, msg string) error {
+	status := node.Status.DeepCopy()
+	if setPaused(&status.Conditions, reason, msg, node.Generation) {
+		r.event(node, corev1.EventTypeNormal, "Paused", msg)
+	}
+	if err := r.updateVoxNodeStatus(ctx, client.ObjectKeyFromObject(node), *status); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }

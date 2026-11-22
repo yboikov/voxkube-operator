@@ -66,6 +66,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	disc := &openvoxv1alpha1.VoxDiscovery{}
 	if err := r.Get(ctx, req.NamespacedName, disc); err != nil {
 		if apierrors.IsNotFound(err) {
+			certExpiry.forgetScraper(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -97,9 +98,20 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	// Paused (own annotation or the VoxCluster's): no OpenVox DB queries and no writes beyond the condition.
+	if reason := pauseReason(disc, cluster, true); reason != "" {
+		msg := pausedMessage(reason, "VoxDiscovery")
+		if setPaused(&disc.Status.Conditions, reason, msg, disc.Generation) {
+			r.event(disc, corev1.EventTypeNormal, "Paused", msg)
+		}
+		return ctrl.Result{}, r.updateDiscoveryStatus(ctx, req.NamespacedName, disc.Status)
+	}
+	meta.RemoveStatusCondition(&disc.Status.Conditions, ConditionPaused)
+
 	// Without OpenVox DB there is nothing to discover: remove what this VoxDiscovery created and wait until the
 	// VoxCluster enables its database (the VoxCluster watch re-triggers this reconcile).
 	if !databaseEnabled(cluster) {
+		certExpiry.forgetScraper(disc.Namespace, disc.Name)
 		if err := r.removeDiscoveryResources(ctx, disc); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -199,6 +211,7 @@ func (r *VoxDiscoveryReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 	// The operator-minted scraper certificate goes when the ServiceMonitor or openvoxCA TLS is switched off.
 	if scraperSecName != fmt.Sprintf("%s-prometheus-scraper-tls", disc.Name) {
+		certExpiry.forgetScraper(disc.Namespace, disc.Name)
 		if err := r.deleteControlledSecret(ctx, disc, fmt.Sprintf("%s-prometheus-scraper-tls", disc.Name)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -811,6 +824,7 @@ func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(
 	existingErr := r.Get(ctx, types.NamespacedName{Namespace: disc.Namespace, Name: secName}, existing)
 	if existingErr == nil {
 		if renew, _ := LeafNeedsRenewal(existing.Data["tls.crt"], caCert, nil, leafRenewBefore); !renew {
+			certExpiry.recordScraper(disc.Namespace, disc.Name, cluster.Name, existing.Data["tls.crt"])
 			return secName, nil
 		}
 	} else if !apierrors.IsNotFound(existingErr) {
@@ -843,6 +857,7 @@ func (r *VoxDiscoveryReconciler) reconcilePrometheusScraperCert(
 	if err := controllerutil.SetControllerReference(disc, sec, r.Scheme); err != nil {
 		return "", err
 	}
+	certExpiry.recordScraper(disc.Namespace, disc.Name, cluster.Name, clientCert)
 	if existingErr == nil {
 		existing.Data = sec.Data
 		if err := r.Update(ctx, existing); err != nil {
