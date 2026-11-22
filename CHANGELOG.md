@@ -8,6 +8,24 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+## [0.3.1]
+
+Certificate expiry metrics (#56) and pausing reconciliation (#57). No breaking changes. Verified end to end on
+v0.3.1-rc.1.
+
+**Upgrade notes:**
+- Apply the 0.3.1 CRDs before upgrading the operator (README → "Applying a new release"): `VoxNode` gains
+  `status.certificateNotAfter`. With old CRDs the API server drops that field, and
+  `voxkube_node_certificate_expiry_timestamp_seconds` stays empty.
+- No pods roll: workload specs are unchanged.
+- The new metrics appear on the existing operator metrics endpoint; add alert rules as you need them (README →
+  "Certificate expiry").
+
+### Changed
+- Docs site: a "What it takes care of" section on the landing page, and OpenVox is described without a Puppet major
+  version.
+- CI: pull requests build images only when an image input changed; lint and tests always run.
+
 ### Added
 - Certificate expiry metrics: `voxkube_ca_certificate_expiry_timestamp_seconds`,
   `voxkube_service_certificate_expiry_timestamp_seconds{component=ca|server|db}`,
