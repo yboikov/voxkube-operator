@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs the repeatable 12-stage VoxKube E2E test suite against a k3s cluster
+# Runs the repeatable 14-stage VoxKube E2E test suite against a k3s cluster
 # with an external Docker openvox-agent container and a self-contained Git HTTP+SSH server.
 set -euo pipefail
 
@@ -494,8 +494,7 @@ wait_for "g10k ConfigMap updated with filter_regex for production" 30 "kubectl -
 wait_for "server Deployment updated with VOXKUBE_GIT_BRANCHES" 30 "kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-server -o json | grep -qF 'VOXKUBE_GIT_BRANCHES'"
 kubectl -n "${NAMESPACE}" rollout status "deployment/${CLUSTER}-server" --timeout=240s
 
-SRV_POD_ONE=$(kubectl -n "${NAMESPACE}" get pod -l "app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=server" -o jsonpath='{.items[0].metadata.name}')
-DEPLOYED_ENVS=$(kubectl -n "${NAMESPACE}" exec "${SRV_POD_ONE}" -c openvox-server -- ls -1 /etc/puppetlabs/code/environments)
+DEPLOYED_ENVS=$(kubectl -n "${NAMESPACE}" exec "deployment/${CLUSTER}-server" -c openvox-server -- ls -1 /etc/puppetlabs/code/environments)
 assert_contains "spec.code.git.branches deployed production environment" "${DEPLOYED_ENVS}" "production"
 assert_not_contains "spec.code.git.branches excluded dev_ignored environment" "${DEPLOYED_ENVS}" "dev_ignored"
 
@@ -616,13 +615,19 @@ spec:
       port: 9100
       protocol: TCP
   serviceMonitor:
-    enabled: false
+    enabled: true
+    tls:
+      enabled: true
+      mode: openvoxCA
     targetLabels:
       env: e2e
 EOF
 
 if wait_for "VoxDiscovery exported 1 node matching class profile::node_exporter" 90 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.discoveredNodes}')\" = '1' ]"; then
   pass "VoxDiscovery exported ${AGENT_CERTNAME} via selector.classes=[profile::node_exporter]"
+fi
+if wait_for "VoxDiscovery minted openvoxCA scraper TLS Secret" 30 "kubectl -n ${NAMESPACE} get secret e2e-node-exporter-prometheus-scraper-tls"; then
+  pass "VoxDiscovery minted e2e-node-exporter-prometheus-scraper-tls"
 fi
 
 SLICE_JSON=$(kubectl -n "${NAMESPACE}" get endpointslice -l "kubernetes.io/service-name=e2e-node-exporter" -o json)
@@ -659,7 +664,7 @@ if wait_for "InvalidLabels reported on bad targetLabels" 30 "[ \"\$(kubectl -n $
 fi
 kubectl -n "${NAMESPACE}" delete vd e2e-bad-labels >/dev/null
 
-log "9. Testing Operator Prometheus Metrics (/metrics) + --node-metric-labels allowlist"
+log "9. Testing Operator Prometheus Metrics (/metrics): node labels + certificate expiry metrics (#56)"
 OP_POD_IP=$(kubectl -n "${NAMESPACE}" get pod -l app.kubernetes.io/name=voxkube-operator -o jsonpath='{.items[0].status.podIP}')
 METRICS=$(curl -fsS --max-time 5 "http://${OP_POD_IP}:8080/metrics")
 NODE_METRIC_LINE=$(printf '%s\n' "${METRICS}" | grep "voxkube_node_active{" | grep "${AGENT_CERTNAME}" || true)
@@ -670,7 +675,129 @@ assert_not_contains "Non-allowlisted label unlisted NOT exported" "${NODE_METRIC
 assert_contains "voxkube_node_last_report_failed exported" "${METRICS}" "voxkube_node_last_report_failed{"
 assert_contains "voxkube_node_last_seen_timestamp_seconds exported" "${METRICS}" "voxkube_node_last_seen_timestamp_seconds{"
 
-log "10. Testing VoxNode Revocation -> ENC/Hiera removal -> CRL sync"
+# Verify v0.3.1 certificate expiry metrics (#56) against actual X.509 certificates
+metric_epoch() {
+  local pattern="$1"
+  local line
+  line=$(printf '%s\n' "${METRICS}" | grep -F "${pattern}" | head -n 1 || true)
+  if [ -n "${line}" ]; then
+    printf '%s\n' "${line}" | awk '{printf "%.0f", $NF}'
+  fi
+}
+
+CA_CERT_END=$(kubectl -n "${NAMESPACE}" get secret "${CLUSTER}-ca-tls" -o jsonpath='{.data.ca\.crt}' | base64 -d | openssl x509 -enddate -noout | cut -d= -f2)
+CA_CERT_EPOCH=$(date -u -d "${CA_CERT_END}" +%s)
+CA_METRIC_EPOCH=$(metric_epoch "voxkube_ca_certificate_expiry_timestamp_seconds{cluster=\"${CLUSTER}\",namespace=\"${NAMESPACE}\"}")
+assert_eq "voxkube_ca_certificate_expiry_timestamp_seconds matches ca.crt NotAfter" "${CA_METRIC_EPOCH}" "${CA_CERT_EPOCH}"
+
+for comp in ca server db; do
+  COMP_LINE=$(printf '%s\n' "${METRICS}" | grep -F "voxkube_service_certificate_expiry_timestamp_seconds{cluster=\"${CLUSTER}\",component=\"${comp}\",namespace=\"${NAMESPACE}\"}" || true)
+  assert_contains "voxkube_service_certificate_expiry_timestamp_seconds exported for component=${comp}" "${COMP_LINE}" "component=\"${comp}\""
+done
+
+SCRAPER_CERT_END=$(kubectl -n "${NAMESPACE}" get secret "e2e-node-exporter-prometheus-scraper-tls" -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -enddate -noout | cut -d= -f2)
+SCRAPER_CERT_EPOCH=$(date -u -d "${SCRAPER_CERT_END}" +%s)
+SCRAPER_METRIC_EPOCH=$(metric_epoch "voxkube_discovery_scraper_certificate_expiry_timestamp_seconds{cluster=\"${CLUSTER}\",discovery=\"e2e-node-exporter\",namespace=\"${NAMESPACE}\"}")
+assert_eq "voxkube_discovery_scraper_certificate_expiry_timestamp_seconds matches scraper tls.crt NotAfter" "${SCRAPER_METRIC_EPOCH}" "${SCRAPER_CERT_EPOCH}"
+
+CRL_LINE=$(printf '%s\n' "${METRICS}" | grep -F "voxkube_crl_next_update_timestamp_seconds{cluster=\"${CLUSTER}\",namespace=\"${NAMESPACE}\"}" || true)
+assert_contains "voxkube_crl_next_update_timestamp_seconds exported" "${CRL_LINE}" "cluster=\"${CLUSTER}\""
+
+VN_NOT_AFTER=$(kubectl -n "${NAMESPACE}" get vn "${AGENT_CERTNAME}" -o jsonpath='{.status.certificateNotAfter}')
+assert_contains "VoxNode.status.certificateNotAfter populated from CA certificate_status" "${VN_NOT_AFTER}" "T"
+VN_NOT_AFTER_EPOCH=$(date -u -d "${VN_NOT_AFTER}" +%s)
+AGENT_CERT_END=$(docker exec "${AGENT_CONTAINER}" openssl x509 -in "/etc/puppetlabs/puppet/ssl/certs/${AGENT_CERTNAME}.pem" -enddate -noout | cut -d= -f2)
+AGENT_CERT_EPOCH=$(date -u -d "${AGENT_CERT_END}" +%s)
+assert_eq "VoxNode.status.certificateNotAfter matches real agent cert NotAfter" "${VN_NOT_AFTER_EPOCH}" "${AGENT_CERT_EPOCH}"
+
+NODE_EXP_LINE=$(printf '%s\n' "${METRICS}" | grep "voxkube_node_certificate_expiry_timestamp_seconds{" | grep "${AGENT_CERTNAME}" || true)
+assert_contains "voxkube_node_certificate_expiry_timestamp_seconds carries allowlisted alerts label" "${NODE_EXP_LINE}" 'alerts="false"'
+NODE_EXP_EPOCH=$(printf '%s\n' "${NODE_EXP_LINE}" | awk '{printf "%.0f", $NF}')
+assert_eq "voxkube_node_certificate_expiry_timestamp_seconds matches agent cert NotAfter" "${NODE_EXP_EPOCH}" "${AGENT_CERT_EPOCH}"
+
+log "10. Testing voxkube.io/paused annotation (#57): cascade, spec freeze, paused deletion hold, skip-cleanup, unpause"
+kubectl -n "${NAMESPACE}" apply -f - <<EOF
+apiVersion: voxkube.io/v1alpha1
+kind: VoxNode
+metadata:
+  name: paused-del.e2e.local
+spec:
+  clusterRef: ${CLUSTER}
+  certname: paused-del.e2e.local
+  state: PendingApproval
+---
+apiVersion: voxkube.io/v1alpha1
+kind: VoxNode
+metadata:
+  name: paused-skip.e2e.local
+spec:
+  clusterRef: ${CLUSTER}
+  certname: paused-skip.e2e.local
+  state: PendingApproval
+EOF
+wait_for "paused-del.e2e.local has finalizer" 30 "kubectl -n ${NAMESPACE} get vn paused-del.e2e.local -o jsonpath='{.metadata.finalizers[*]}' | grep -qF 'voxkube.io/node-cleanup'"
+wait_for "paused-skip.e2e.local has finalizer" 30 "kubectl -n ${NAMESPACE} get vn paused-skip.e2e.local -o jsonpath='{.metadata.finalizers[*]}' | grep -qF 'voxkube.io/node-cleanup'"
+
+# Pause the VoxCluster and verify cascade to VoxNode and VoxDiscovery
+kubectl -n "${NAMESPACE}" annotate vc "${CLUSTER}" voxkube.io/paused=true --overwrite >/dev/null
+if wait_for "VoxCluster Paused=True/AnnotationSet" 30 "[ \"\$(kubectl -n ${NAMESPACE} get vc ${CLUSTER} -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].reason}')\" = 'AnnotationSet' ]"; then
+  pass "VoxCluster entered Paused=True (AnnotationSet)"
+fi
+if wait_for "VoxNode ${AGENT_CERTNAME} Paused=True/ClusterPaused" 30 "[ \"\$(kubectl -n ${NAMESPACE} get vn ${AGENT_CERTNAME} -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].reason}')\" = 'ClusterPaused' ]"; then
+  pass "VoxCluster pause cascaded to VoxNode ${AGENT_CERTNAME} (ClusterPaused)"
+fi
+if wait_for "VoxDiscovery e2e-node-exporter Paused=True/ClusterPaused" 30 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].reason}')\" = 'ClusterPaused' ]"; then
+  pass "VoxCluster pause cascaded to VoxDiscovery e2e-node-exporter (ClusterPaused)"
+fi
+
+# Spec changes must not be applied while paused
+kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{"spec":{"server":{"replicas":3}}}' >/dev/null
+sleep 10
+PAUSED_REPLICAS=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath='{.spec.replicas}')
+assert_eq "spec.server.replicas=3 NOT applied to Deployment while paused" "${PAUSED_REPLICAS}" "2"
+
+# Deleting a VoxNode while paused holds its finalizer until unpause (and mentions skip-cleanup)
+kubectl -n "${NAMESPACE}" delete vn paused-del.e2e.local --wait=false >/dev/null
+if wait_for "paused-del.e2e.local Paused condition mentions skip-cleanup" 30 "kubectl -n ${NAMESPACE} get vn paused-del.e2e.local -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].message}' | grep -qF 'voxkube.io/skip-cleanup'"; then
+  pass "Paused deletion held finalizer and documented voxkube.io/skip-cleanup"
+fi
+sleep 5
+if kubectl -n "${NAMESPACE}" get vn paused-del.e2e.local >/dev/null 2>&1; then
+  pass "paused-del.e2e.local remains held while VoxCluster is paused"
+else
+  fail "paused-del.e2e.local was unexpectedly deleted while paused!"
+fi
+
+# skip-cleanup releases a paused VoxNode immediately
+kubectl -n "${NAMESPACE}" annotate vn paused-skip.e2e.local voxkube.io/skip-cleanup=true --overwrite >/dev/null
+kubectl -n "${NAMESPACE}" delete vn paused-skip.e2e.local --wait=false >/dev/null
+if wait_for "paused-skip.e2e.local released immediately with skip-cleanup" 30 "! kubectl -n ${NAMESPACE} get vn paused-skip.e2e.local >/dev/null 2>&1"; then
+  pass "voxkube.io/skip-cleanup=true released paused VoxNode immediately"
+fi
+
+# Unpause the VoxCluster: queued spec change applies, Paused conditions clear, held deletion completes
+kubectl -n "${NAMESPACE}" annotate vc "${CLUSTER}" voxkube.io/paused- >/dev/null
+if wait_for "Queued spec.server.replicas=3 applied after unpause" 45 "[ \"\$(kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-server -o jsonpath='{.spec.replicas}')\" = '3' ]"; then
+  pass "Queued spec.server.replicas=3 applied on unpause"
+fi
+# Scale back to 2 immediately to keep VPS memory usage lean
+kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{"spec":{"server":{"replicas":2}}}' >/dev/null
+wait_for "Deployment scaled back to 2 replicas" 45 "[ \"\$(kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-server -o jsonpath='{.spec.replicas}')\" = '2' ]"
+
+if wait_for "VoxCluster Paused condition removed after unpause" 30 "[ -z \"\$(kubectl -n ${NAMESPACE} get vc ${CLUSTER} -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].status}')\" ]"; then
+  pass "VoxCluster Paused condition removed on unpause"
+fi
+if wait_for "VoxNode Paused condition removed after unpause" 30 "[ -z \"\$(kubectl -n ${NAMESPACE} get vn ${AGENT_CERTNAME} -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].status}')\" ]"; then
+  pass "VoxNode ${AGENT_CERTNAME} Paused condition removed on unpause"
+fi
+if wait_for "VoxDiscovery Paused condition removed after unpause" 30 "[ -z \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.conditions[?(@.type==\"Paused\")].status}')\" ]"; then
+  pass "VoxDiscovery e2e-node-exporter Paused condition removed on unpause"
+fi
+if wait_for "Held VoxNode paused-del.e2e.local cleaned and deleted after unpause" 60 "! kubectl -n ${NAMESPACE} get vn paused-del.e2e.local >/dev/null 2>&1"; then
+  pass "Held VoxNode paused-del.e2e.local cleaned up and released on unpause"
+fi
+
+log "11. Testing VoxNode Revocation -> ENC/Hiera removal -> CRL sync"
 kubectl -n "${NAMESPACE}" patch vn "${AGENT_CERTNAME}" --type=merge -p '{"spec":{"state":"Revoked"}}'
 if wait_for "VoxNode Phase=Revoked" 60 "[ \"\$(kubectl -n ${NAMESPACE} get vn ${AGENT_CERTNAME} -o jsonpath='{.status.phase}')\" = 'Revoked' ]"; then
   pass "VoxNode transitioned to Phase=Revoked"
@@ -678,7 +805,7 @@ fi
 ENC_AFTER_REVOKE=$(kubectl -n "${NAMESPACE}" get cm "${CLUSTER}-enc-nodes" -o jsonpath='{.data}')
 assert_not_contains "Revoked node removed from ENC ConfigMap" "${ENC_AFTER_REVOKE}" "${AGENT_CERTNAME}"
 
-log "11. Testing Finalizer hold (CleanupPending when CA down) & clean release when CA returns"
+log "12. Testing Finalizer hold (CleanupPending when CA down) & clean release when CA returns"
 kubectl -n "${NAMESPACE}" scale statefulset "${CLUSTER}-ca" --replicas=0 >/dev/null
 wait_for "CA pod terminated" 60 "[ -z \"\$(kubectl -n ${NAMESPACE} get pod -l app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=ca -o name)\" ]"
 kubectl -n "${NAMESPACE}" delete vn "${AGENT_CERTNAME}" --wait=false >/dev/null
@@ -703,7 +830,7 @@ else
   pass "autoCreateVoxNode did NOT resurrect cleaned node ${AGENT_CERTNAME}"
 fi
 
-log "12. Testing Ruby PSK autosign (pp_preshared_key: bad key rejected, valid key autosigned)"
+log "13. Testing Ruby PSK autosign (pp_preshared_key: bad key rejected, valid key autosigned)"
 kubectl -n "${NAMESPACE}" create secret generic e2e-autosign-psk --from-literal=psk="super-psk-e2e-key-2026"
 kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{"spec":{"ca":{"autosignMode":"psk","pskSecretRef":"e2e-autosign-psk"}}}'
 wait_for "CA StatefulSet updated with autosign-psk volume" 30 "kubectl -n ${NAMESPACE} get sts ${CLUSTER}-ca -o jsonpath='{.spec.template.spec.volumes[*].name}' | grep -qF 'autosign-psk'"
@@ -757,7 +884,7 @@ else
   fail "Ruby PSK autosign failed to sign CSR with valid pp_preshared_key!"
 fi
 
-log "13. Testing component pruning (database.enabled=false, hieraSecrets.enabled=false) & CA retention"
+log "14. Testing component pruning (database.enabled=false, hieraSecrets.enabled=false), metric cleanup & CA retention"
 kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{
   "spec": {
     "database": { "enabled": false },
@@ -770,6 +897,12 @@ fi
 if wait_for "VoxDiscovery stood down with DatabaseDisabled" 60 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].reason}')\" = 'DatabaseDisabled' ]"; then
   pass "VoxDiscovery stood down cleanly (DatabaseDisabled) and removed EndpointSlices"
 fi
+
+# Verify DB and scraper certificate expiry series are forgotten once disabled, while CA/server stay exported
+METRICS_AFTER_PRUNE=$(curl -fsS --max-time 5 "http://${OP_POD_IP}:8080/metrics")
+assert_not_contains "DB service cert expiry metric dropped when database.enabled=false" "${METRICS_AFTER_PRUNE}" "component=\"db\""
+assert_not_contains "Scraper cert expiry metric dropped when VoxDiscovery DatabaseDisabled" "${METRICS_AFTER_PRUNE}" "discovery=\"e2e-node-exporter\""
+assert_contains "Server service cert expiry metric still exported after DB disabled" "${METRICS_AFTER_PRUNE}" "component=\"server\""
 
 # Verify CA Secret and CA PVC survived pruning
 if kubectl -n "${NAMESPACE}" get secret "${CLUSTER}-ca-tls" >/dev/null 2>&1 && kubectl -n "${NAMESPACE}" get pvc "${CLUSTER}-ca-data" >/dev/null 2>&1; then
