@@ -151,6 +151,10 @@ spec:
   ca:
     storageSize: 1Gi
     autosignMode: voxnode
+    javaArgs: "-Xms256m -Xmx384m"
+    resources:
+      requests:
+        memory: 256Mi
   server:
 ${SERVER_IMAGE_YAML}
     replicas: 2
@@ -161,6 +165,11 @@ ${SERVER_IMAGE_YAML}
       runAsGroup: 0
   database:
     enabled: true
+    javaArgs: "-Xms256m -Xmx512m"
+    softWriteFailure: true
+    resources:
+      requests:
+        memory: 256Mi
     postgres:
       mode: builtin
   networking:
@@ -229,6 +238,41 @@ else
 fi
 DB_CERT_TEXT=$(kubectl -n "${NAMESPACE}" exec "${DB_POD}" -c openvox-db -- openssl x509 -in /etc/puppetlabs/puppetdb/ssl/tls.crt -noout -text)
 assert_not_contains "DB pod ${DB_POD} cert has no pp_cli_auth OID" "${DB_CERT_TEXT}" "1.3.6.1.4.1.34380.1.3.39"
+
+# Verify v0.3.0 production workload controls (#36): probes, DB/CA javaArgs & resources, softWriteFailure, PDB, anti-affinity
+CA_POD=$(kubectl -n "${NAMESPACE}" get pod -l "app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=ca" -o jsonpath='{.items[0].metadata.name}')
+SRV_POD_FIRST=$(printf '%s\n' ${SRV_PODS} | head -n 1)
+for pair in "${CA_POD}:openvox-ca" "${SRV_POD_FIRST}:openvox-server" "${DB_POD}:openvox-db"; do
+  pod="${pair%%:*}"
+  ctr="${pair##*:}"
+  PROBES=$(kubectl -n "${NAMESPACE}" get pod "${pod}" -o jsonpath="{.spec.containers[?(@.name=='${ctr}')].startupProbe.periodSeconds},{.spec.containers[?(@.name=='${ctr}')].livenessProbe.periodSeconds}")
+  assert_eq "Pod ${pod} (${ctr}) has startupProbe (10s) and livenessProbe (20s)" "${PROBES}" "10,20"
+done
+DB_JAVA=$(kubectl -n "${NAMESPACE}" get pod "${DB_POD}" -o jsonpath="{.spec.containers[?(@.name=='openvox-db')].env[?(@.name=='JAVA_ARGS')].value}")
+DB_MEM=$(kubectl -n "${NAMESPACE}" get pod "${DB_POD}" -o jsonpath="{.spec.containers[?(@.name=='openvox-db')].resources.requests.memory}")
+CA_MEM=$(kubectl -n "${NAMESPACE}" get pod "${CA_POD}" -o jsonpath="{.spec.containers[?(@.name=='openvox-ca')].resources.requests.memory}")
+assert_eq "DB pod received spec.database.javaArgs" "${DB_JAVA}" "-Xms256m -Xmx512m"
+assert_eq "DB pod received spec.database.resources.requests.memory" "${DB_MEM}" "256Mi"
+assert_eq "CA pod received spec.ca.resources.requests.memory" "${CA_MEM}" "256Mi"
+
+PUPPETDB_CONF=$(kubectl -n "${NAMESPACE}" get cm "${CLUSTER}-server-config" -o jsonpath='{.data.puppetdb\.conf}')
+assert_contains "puppetdb.conf sets soft_write_failure = true" "${PUPPETDB_CONF}" "soft_write_failure = true"
+
+PDB_MAX=$(kubectl -n "${NAMESPACE}" get pdb "${CLUSTER}-server" -o jsonpath='{.spec.maxUnavailable}' 2>/dev/null || true)
+assert_eq "Compiler PDB ${CLUSTER}-server created with maxUnavailable=1" "${PDB_MAX}" "1"
+if kubectl -n "${NAMESPACE}" get pdb "${CLUSTER}-db" >/dev/null 2>&1; then
+  fail "DB PDB ${CLUSTER}-db should NOT exist when database.replicas=1"
+else
+  pass "DB PDB ${CLUSTER}-db omitted for single-replica OpenVox DB"
+fi
+
+SRV_AFFINITY=$(kubectl -n "${NAMESPACE}" get pod "${SRV_POD_FIRST}" -o jsonpath='{.spec.affinity.podAntiAffinity.preferredDuringSchedulingIgnoredDuringExecution[0].podAffinityTerm.topologyKey}')
+assert_eq "Compilers have default soft pod anti-affinity on hostname" "${SRV_AFFINITY}" "kubernetes.io/hostname"
+
+HIERA_SHARDS_INIT=$(kubectl -n "${NAMESPACE}" get vc "${CLUSTER}" -o jsonpath='{.status.hieraSecrets.shards}')
+HIERA_CAP_REASON=$(kubectl -n "${NAMESPACE}" get vc "${CLUSTER}" -o jsonpath='{.status.conditions[?(@.type=="HieraSecretsCapacity")].reason}')
+assert_eq "Initial status.hieraSecrets.shards" "${HIERA_SHARDS_INIT}" "1"
+assert_eq "HieraSecretsCapacity condition reason" "${HIERA_CAP_REASON}" "WithinLimit"
 
 log "4. Starting external Docker openvox-agent container (${AGENT_CONTAINER}) & testing CSR + pp_role + autoCreateVoxNode"
 docker run -d --name "${AGENT_CONTAINER}" \
@@ -472,6 +516,45 @@ sleep 20
 REV_AFTER_DEV=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath='{.spec.template.metadata.annotations.voxkube\.io/code-revision}')
 assert_eq "Push to unselected branch dev_ignored did NOT change code-revision" "${REV_AFTER_DEV}" "${REV_BEFORE_DEV}"
 
+# Test v0.3.0 Hiera Secret sharding (#37): resize 1 -> 3, verify projected volume, old Secret pruned, and Puppet still reads Sensitive secret
+kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{"spec":{"hieraSecrets":{"shards":3}}}'
+if wait_for "VoxCluster status.hieraSecrets.shards=3" 60 "[ \"\$(kubectl -n ${NAMESPACE} get vc ${CLUSTER} -o jsonpath='{.status.hieraSecrets.shards}')\" = '3' ]"; then
+  pass "VoxCluster resized Hiera Secrets to 3 shards"
+fi
+kubectl -n "${NAMESPACE}" rollout status "deployment/${CLUSTER}-server" --timeout=240s
+
+for idx in 0 1 2; do
+  if kubectl -n "${NAMESPACE}" get secret "${CLUSTER}-hiera-secrets-s3-${idx}" >/dev/null 2>&1; then
+    pass "Shard Secret ${CLUSTER}-hiera-secrets-s3-${idx} exists"
+  else
+    fail "Shard Secret ${CLUSTER}-hiera-secrets-s3-${idx} missing!"
+  fi
+done
+if wait_for "Old single-shard Secret ${CLUSTER}-hiera-secrets pruned after rollout" 60 "! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-hiera-secrets"; then
+  pass "Old single-shard Secret ${CLUSTER}-hiera-secrets pruned after compiler rollout"
+fi
+
+HIERA_SHARD_NAMES=$(kubectl -n "${NAMESPACE}" get vc "${CLUSTER}" -o jsonpath='{.status.hieraSecrets.secretNames[*]}')
+assert_eq "status.hieraSecrets.secretNames lists all 3 shards" "${HIERA_SHARD_NAMES}" "${CLUSTER}-hiera-secrets-s3-0 ${CLUSTER}-hiera-secrets-s3-1 ${CLUSTER}-hiera-secrets-s3-2"
+HIERA_SINGLE_NAME=$(kubectl -n "${NAMESPACE}" get vc "${CLUSTER}" -o jsonpath='{.status.hieraSecretName}')
+assert_eq "status.hieraSecretName cleared when shards > 1" "${HIERA_SINGLE_NAME}" ""
+
+PROJ_SOURCES=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath="{.spec.template.spec.volumes[?(@.name=='hiera-secrets')].projected.sources[*].secret.name}")
+assert_eq "Compiler projected volume merges all 3 shard Secrets" "${PROJ_SOURCES}" "${CLUSTER}-hiera-secrets-s3-0 ${CLUSTER}-hiera-secrets-s3-1 ${CLUSTER}-hiera-secrets-s3-2"
+
+# Remove /etc/voxkube-secret.txt on the agent and confirm Puppet re-populates it from the 3-shard projected volume
+docker exec "${AGENT_CONTAINER}" rm -f /etc/voxkube-secret.txt
+AGENT_RC=0
+AGENT_OUT=$(docker exec "${AGENT_CONTAINER}" /opt/puppetlabs/bin/puppet agent -t 2>&1) || AGENT_RC=$?
+if [ "${AGENT_RC}" -eq 0 ] || [ "${AGENT_RC}" -eq 2 ]; then
+  pass "Agent run succeeded against 3-shard projected Hiera volume (exit ${AGENT_RC})"
+else
+  fail "Agent run failed against 3-shard projected Hiera volume (exit ${AGENT_RC}): ${AGENT_OUT}"
+fi
+SECRET_TXT_SHARDED=$(docker exec "${AGENT_CONTAINER}" cat /etc/voxkube-secret.txt 2>/dev/null || true)
+assert_eq "Sensitive Hiera secret re-populated from 3-shard projected volume" "${SECRET_TXT_SHARDED}" "super-secret-e2e-value"
+assert_not_contains "Sensitive secret still NOT leaked in agent output with shards=3" "${AGENT_OUT}" "super-secret-e2e-value"
+
 # Test voxkube.io/sync-now rolls compilers even when HEAD did not move
 OLD_REV=$(kubectl -n "${NAMESPACE}" get deploy "${CLUSTER}-server" -o jsonpath='{.spec.template.metadata.annotations.voxkube\.io/code-revision}')
 SYNC_VAL="e2e-$(date +%s)"
@@ -681,8 +764,8 @@ kubectl -n "${NAMESPACE}" patch vc "${CLUSTER}" --type=merge -p '{
     "hieraSecrets": { "enabled": false }
   }
 }'
-if wait_for "DB + Postgres + DB TLS + Hiera Secret pruned" 90 "! kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-db && ! kubectl -n ${NAMESPACE} get sts ${CLUSTER}-postgres && ! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-db-tls && ! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-hiera-secrets"; then
-  pass "pruneDisabledComponents deleted DB Deployment, Postgres StatefulSet, DB TLS Secret, and Hiera Secret"
+if wait_for "DB + Postgres + DB TLS + all Hiera Shard Secrets pruned" 90 "! kubectl -n ${NAMESPACE} get deploy ${CLUSTER}-db && ! kubectl -n ${NAMESPACE} get sts ${CLUSTER}-postgres && ! kubectl -n ${NAMESPACE} get secret ${CLUSTER}-db-tls && [ -z \"\$(kubectl -n ${NAMESPACE} get secret -l app.kubernetes.io/instance=${CLUSTER},app.kubernetes.io/component=hiera-secrets -o name)\" ]"; then
+  pass "pruneDisabledComponents deleted DB Deployment, Postgres StatefulSet, DB TLS Secret, and all Hiera Shard Secrets"
 fi
 if wait_for "VoxDiscovery stood down with DatabaseDisabled" 60 "[ \"\$(kubectl -n ${NAMESPACE} get vd e2e-node-exporter -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].reason}')\" = 'DatabaseDisabled' ]"; then
   pass "VoxDiscovery stood down cleanly (DatabaseDisabled) and removed EndpointSlices"
