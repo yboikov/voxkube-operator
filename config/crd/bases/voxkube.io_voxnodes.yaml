@@ -146,6 +146,9 @@ spec:
                 x-kubernetes-validations:
                 - message: certname is immutable; create a new VoxNode for a new certname
                   rule: self == oldSelf
+                - message: certnames ending in .svc or .svc.cluster.local are reserved
+                    for the services of the VoxCluster
+                  rule: '!self.endsWith(''.svc'') && !self.endsWith(''.svc.cluster.local'')'
               classification:
                 description: Classification defines the Kubernetes-native ENC classification
                   for this node.

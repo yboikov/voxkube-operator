@@ -290,3 +290,31 @@ func TestPrepareUnstructuredUpdate(t *testing.T) {
 		t.Errorf("foreign annotations and the resourceVersion must be kept, got %v / %s", changed.GetAnnotations(), changed.GetResourceVersion())
 	}
 }
+
+// A VoxNode with a reserved certname (ReservedCertname) was never signed: deleting it must not clean the cluster's
+// own service certname on the CA or deactivate it in OpenVox DB, paused or not (#67).
+func TestDeletingReservedCertnameVoxNodeMakesNoCalls(t *testing.T) {
+	ctx := context.Background()
+	for _, paused := range []bool{false, true} {
+		for _, certname := range []string{"openvox.openvox.svc", "openvox-db.openvox.svc", "x.default.svc.cluster.local"} {
+			node := testNode(openvoxv1alpha1.NodeStateActive)
+			node.Spec.Certname = certname
+			now := metav1.Now()
+			node.DeletionTimestamp = &now
+			node.Finalizers = []string{VoxNodeFinalizer}
+			if paused {
+				node.Annotations = map[string]string{AnnotationPaused: "true"}
+			}
+			r, c, f := newLifecycleFixture(t, node, true)
+			if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: web01Key}); err != nil {
+				t.Fatal(err)
+			}
+			if f.cleans != 0 || f.deactivates != 0 || f.calls != 0 {
+				t.Errorf("%s (paused %v): %d CA/DB calls (clean %d, deactivate %d), want none", certname, paused, f.calls, f.cleans, f.deactivates)
+			}
+			if err := c.Get(ctx, web01Key, &openvoxv1alpha1.VoxNode{}); !apierrors.IsNotFound(err) {
+				t.Errorf("%s (paused %v): the finalizer must be released at once, got %v", certname, paused, err)
+			}
+		}
+	}
+}

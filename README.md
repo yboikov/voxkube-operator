@@ -769,7 +769,7 @@ Labels `monitoring.voxkube.io/<label>` on a `VoxNode` become label `<label>` on 
 | Field | Type | Default | Validation | Description |
 |---|---|---|---|---|
 | `clusterRef` | string | – | **required**, immutable | `VoxCluster` in the same namespace. |
-| `certname` | string | – | **required**, immutable, `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`, max 253 | Agent certname (FQDN). If two `VoxNode`s of a cluster share a certname, the oldest owns it; the others get `DuplicateCertname` and are ignored (never signed, revoked, cleaned or classified; deleting one never touches the certificate). In-cluster service names (`<cluster>.<ns>.svc`, anything ending in `.svc` or `.svc.cluster.local`) are reserved: `ReservedCertname`, never signed. |
+| `certname` | string | – | **required**, immutable, `^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`, max 253, not ending in `.svc` / `.svc.cluster.local` | Agent certname (FQDN). If two `VoxNode`s of a cluster share a certname, the oldest owns it; the others get `DuplicateCertname` and are ignored (never signed, revoked, cleaned or classified; deleting one never touches the certificate). In-cluster service names (`<cluster>.<ns>.svc`, anything ending in `.svc` or `.svc.cluster.local`) are reserved: rejected at admission, and older objects get `ReservedCertname`, are never signed, and are deleted without CA or OpenVox DB cleanup. |
 | `state` | string | `Active` | `PendingApproval` \| `Active` \| `Revoked` \| `Decommissioned` | See the [state machine](#voxnode-state-machine). |
 | `classification` | [`NodeClassificationSpec`](#voxnodespecclassification) | – | – | ENC data. |
 | `certificates` | [][`CertManagerCertRequest`](#voxnodespeccertificates) | – | – | cert-manager certificates injected into Hiera. |

@@ -128,6 +128,7 @@ type VoxNodeSpec struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([a-z0-9._-]*[a-z0-9])?$`
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="certname is immutable; create a new VoxNode for a new certname"
+	// +kubebuilder:validation:XValidation:rule="!self.endsWith('.svc') && !self.endsWith('.svc.cluster.local')",message="certnames ending in .svc or .svc.cluster.local are reserved for the services of the VoxCluster"
 	Certname string `json:"certname"`
 
 	// State controls CSR signing, revocation, and atomic CA + PuppetDB decommissioning.
