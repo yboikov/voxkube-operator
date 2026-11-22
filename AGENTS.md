@@ -73,6 +73,9 @@ update that section in the same change. Never document a field as working unless
     after that check. A VoxNode's deletion cleanup waits while paused (skip-cleanup excepted).
   - Certificate expiry metrics (`cert_expiry.go`): record into `certExpiry` where a Secret is already read during
     reconcile and forget on delete/disable. `Collect()` must never read the API or parse PEM.
+  - Jetty (OpenVox Server and OpenVox DB) reads `ssl-crl-path` only at startup. A CRL change must roll the pods that
+    check agents (`voxkube.io/crl-hash`): always the compilers, OpenVox DB only with `database.certificateAllowlist`.
+    Never rely on in-place reload; a revoked agent stayed accepted (#69).
   - CA and OpenVox DB mTLS clients come from `mtlsClients` (one per VoxCluster, rebuilt on credential change).
   - A (cluster, certname) is owned by its oldest VoxNode (`certnameOwner`, `servedVoxNodes`). Duplicates never
     sign, revoke, clean or classify, and are deleted without cleanup. `*.svc` certnames are reserved
@@ -147,7 +150,6 @@ update that section in the same change. Never document a field as working unless
 ## Known limitations / backlog
 
 - Importing an existing Puppet CA (migration from Foreman/puppetserver) isn't supported; CA rotation is manual.
-- Compilers rely on Jetty's CRL reload for `crl.pem` updates.
 - ServiceMonitor TLS needs exporter certificates with IP SANs (Prometheus scrapes by IP).
 - `sslMode: verify-*` for external PostgreSQL needs the DB CA in the OpenVox DB JVM trust store; there's no
   field for it yet.

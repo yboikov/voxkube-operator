@@ -8,6 +8,13 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Security
+- Revoked agent certificates stayed accepted by running compilers: Jetty reads the CRL only at startup, and the
+  operator relied on an in-place reload. A CRL change (revocation, decommission or deletion of a VoxNode) now rolls the
+  compilers through the new pod annotation `voxkube.io/crl-hash`, and OpenVox DB when `database.certificateAllowlist`
+  admits extra clients. With the default two compilers and their PodDisruptionBudget this is a zero-downtime rollout
+  (#69). **Upgrading rolls the compilers once** (and OpenVox DB if it has an allowlist).
+
 ### Fixed
 - Deleting a VoxNode with a reserved certname (`*.svc`, `*.svc.cluster.local`, `ReservedCertname`) no longer calls the
   CA `clean` and OpenVox DB `deactivate` for that name, and no longer waits while paused (#67).

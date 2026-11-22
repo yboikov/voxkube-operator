@@ -213,12 +213,13 @@ func (r *VoxClusterReconciler) reconcileCAPKI(ctx context.Context, cluster *open
 
 // reconcileWorkloadTLS keeps a workload TLS Secret (owned by the VoxCluster) with its own leaf certificate
 // (no pp_cli_auth), the CA certificate and the current CRL, all taken from <cluster>-ca-tls. The CA key is never
-// copied. It returns a hash of the certificate; pods roll when it changes (CRL updates are reloaded in place).
+// copied. It returns a hash of the certificate and one of the CRL; pods roll when either changes, because Jetty in
+// OpenVox Server and OpenVox DB reads ssl-crl-path only at startup (a revoked agent stayed accepted, #69).
 func (r *VoxClusterReconciler) reconcileWorkloadTLS(ctx context.Context, cluster *openvoxv1alpha1.VoxCluster,
-	component, secName, commonName string, sans []string) (string, error) {
+	component, secName, commonName string, sans []string) (certHash, crlHash string, err error) {
 	ca := &corev1.Secret{}
 	if err := r.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: caSecretName(cluster)}, ca); err != nil {
-		return "", err
+		return "", "", err
 	}
 	data := map[string][]byte{}
 	existing := &corev1.Secret{}
@@ -227,7 +228,7 @@ func (r *VoxClusterReconciler) reconcileWorkloadTLS(ctx context.Context, cluster
 			data[k] = existing.Data[k]
 		}
 	} else if !apierrors.IsNotFound(err) {
-		return "", err
+		return "", "", err
 	}
 	if renew, why := LeafNeedsRenewal(data["tls.crt"], ca.Data["ca.crt"], sans, leafRenewBefore); renew {
 		certPEM, keyPEM, err := IssueLeafCertificate(ca.Data["ca.crt"], ca.Data["ca.key"], LeafCertOptions{
@@ -236,11 +237,11 @@ func (r *VoxClusterReconciler) reconcileWorkloadTLS(ctx context.Context, cluster
 			Duration:   serviceCertTTL,
 		})
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		pub, err := ExtractPublicKeyPEM(keyPEM)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		data["tls.crt"], data["tls.key"], data["tls.pub"] = certPEM, keyPEM, pub
 		if len(existing.Data) > 0 {
@@ -258,12 +259,12 @@ func (r *VoxClusterReconciler) reconcileWorkloadTLS(ctx context.Context, cluster
 		Data:       data,
 	}
 	if err := controllerutil.SetControllerReference(cluster, sec, r.Scheme); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := r.createOrUpdateSecret(ctx, sec); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return hashBytes(data["tls.crt"]), nil
+	return hashBytes(data["tls.crt"]), hashBytes(bytes.TrimSpace(data["crl.pem"])), nil
 }
 
 // syncCRL copies the CA's current CRL into <cluster>-ca-tls (key crl.pem); reconcileWorkloadTLS passes it on to the

@@ -415,6 +415,7 @@ puppetlabs.trapperkeeper.services.watcher.filesystem-watch-service/filesystem-wa
 	podAnnotations := map[string]string{
 		AnnotationConfigHash: hashStrings(srvCM.Data),
 		AnnotationTLSHash:    st.serverTLSHash,
+		AnnotationCRLHash:    st.crlHash, // agents are checked against the CRL here
 	}
 	for k, v := range plan.podAnnotations {
 		if v != "" {
