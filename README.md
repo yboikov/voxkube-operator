@@ -1,12 +1,8 @@
 # VoxKube
 
-[![Built Entirely with AI](https://img.shields.io/badge/Built_Entirely_with-AI-8A2BE2?style=flat-square)](#vibe-coded)
 [![API Group](https://img.shields.io/badge/API-voxkube.io%2Fv1alpha1-blue?style=flat-square)](#api-reference-api-reference)
 [![OpenShift](https://img.shields.io/badge/OpenShift-restricted--v2_SCC_Ready-EE0000?style=flat-square)](#why-run-it-this-way)
 [![License](https://img.shields.io/badge/License-Apache_2.0-green?style=flat-square)](LICENSE)
-
-> [!NOTE]
-> <a id="vibe-coded"></a>**Vibe-coded project.** Everything in this repository was written by AI. There are no human edits anywhere in it. ;)
 
 ## What is VoxKube?
 
@@ -1182,3 +1178,7 @@ helm lint charts/voxkube-operator
 # Regenerate CRD manifests and deepcopy code after API changes
 make generate manifests
 ```
+
+### How this project is built
+
+All code, tests, and documentation in this repository are authored by AI coding agents under human direction, using separate implementation and architecture/QA review loops. Every release is gated by Go/Helm lint, unit and controller tests, and a repeatable 14-stage live E2E suite ([`hack/e2e/`](hack/e2e/README.md)) against real OpenVox 8 agents.
