@@ -8,6 +8,14 @@ GitHub Releases also carry auto-generated notes from merged pull requests.
 
 ## [Unreleased]
 
+### Fixed
+- Deleting a VoxNode with a reserved certname (`*.svc`, `*.svc.cluster.local`, `ReservedCertname`) no longer calls the
+  CA `clean` and OpenVox DB `deactivate` for that name, and no longer waits while paused (#67).
+
+### Changed
+- `VoxNode.spec.certname` ending in `.svc` or `.svc.cluster.local` is now rejected at admission (CEL). Such VoxNodes
+  were never signed; existing ones keep working until deleted (#67).
+
 ## [0.3.1]
 
 Certificate expiry metrics (#56) and pausing reconciliation (#57). No breaking changes. Verified end to end on

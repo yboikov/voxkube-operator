@@ -95,7 +95,7 @@ func (r *VoxNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	// While paused the cleanup waits (it would call the CA and OpenVox DB); skip-cleanup still releases at once.
 	if !node.DeletionTimestamp.IsZero() {
 		cleanupNeeded := node.Annotations[AnnotationSkipCleanup] != "true" && duplicateOf == "" &&
-			clusterFound && cluster.DeletionTimestamp.IsZero()
+			clusterFound && cluster.DeletionTimestamp.IsZero() && !reservedCertname(cluster, node.Spec.Certname)
 		if paused != "" && cleanupNeeded && controllerutil.ContainsFinalizer(node, VoxNodeFinalizer) {
 			return ctrl.Result{}, r.markNodePaused(ctx, node, paused,
 				pausedMessage(paused, "VoxNode")+"; deletion waits for that (or set "+AnnotationSkipCleanup+"=\"true\" to delete without cleanup)")
@@ -230,6 +230,9 @@ func (r *VoxNodeReconciler) finalizeVoxNode(ctx context.Context, node *openvoxv1
 	case duplicateOf != "":
 		// The certificate belongs to the machine the owning VoxNode manages: cleaning it would revoke that machine.
 		logger.Info("duplicate VoxNode; releasing it without CA/OpenVox DB cleanup", "certname", node.Spec.Certname, "owner", duplicateOf)
+	case clusterFound && reservedCertname(cluster, node.Spec.Certname):
+		// Never signed or classified (ReservedCertname); cleaning it would target the cluster's own service certnames.
+		logger.Info("reserved certname; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
 	case !clusterLive:
 		// Nothing left to clean against (or it is being torn down): don't block deletion forever.
 		logger.Info("VoxCluster gone; releasing the VoxNode without CA/OpenVox DB cleanup", "certname", node.Spec.Certname)
