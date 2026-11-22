@@ -174,6 +174,20 @@ func (r *VoxClusterReconciler) pruneHieraShards(ctx context.Context, cluster *op
 		}
 		stale = append(stale, s.Name)
 	}
+	// The single-shard name also by name, in case its labels were changed by hand.
+	if legacy := cluster.Name + "-hiera-secrets"; !active[legacy] {
+		s := &corev1.Secret{}
+		err := r.Get(ctx, client.ObjectKey{Namespace: cluster.Namespace, Name: legacy}, s)
+		switch {
+		case err == nil && metav1.IsControlledBy(s, cluster):
+			if err := r.Delete(ctx, s); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+			stale = append(stale, legacy)
+		case err != nil && !apierrors.IsNotFound(err):
+			return err
+		}
+	}
 	if len(stale) > 0 {
 		sort.Strings(stale)
 		r.event(cluster, corev1.EventTypeNormal, "HieraShardsPruned", "Deleted previous Hiera Secrets: "+strings.Join(stale, ", "))

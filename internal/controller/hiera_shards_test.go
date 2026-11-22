@@ -99,7 +99,8 @@ func setServerRollout(t *testing.T, c client.Client, done bool) {
 	if !done {
 		d.Status.UpdatedReplicas = 0
 	}
-	if err := c.Update(context.Background(), d); err != nil {
+	// Deployments have a status subresource in the fake client too: Update would drop the status.
+	if err := c.Status().Update(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
 }
