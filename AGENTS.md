@@ -140,6 +140,9 @@ update that section in the same change. Never document a field as working unless
    `version` and `appVersion` in `Chart.yaml` together (a test enforces that they are equal).
 10. CI publishes images only for `v*` tags (releases and pre-releases) and from the weekly OpenVox rebuild;
     pushes to `main` run lint and tests only. Don't add image pushes to `main` builds.
+    Pull requests build (without pushing) only when an image input changed (`changes` job: `images/`, `cmd/`,
+    `internal/`, `api/`, `go.mod`/`go.sum`, `ci.yaml`); add new image inputs to that pattern. Never filter the
+    whole workflow by paths: the required lint check would never report and block the merge.
 
 ## Known limitations / backlog
 

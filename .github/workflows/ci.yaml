@@ -15,6 +15,38 @@ permissions:
   packages: write
 
 jobs:
+  # On pull requests, image builds run only when something that goes into an image changed. Lint & tests (the
+  # required check) always run. Don't move this into a workflow-level paths filter: a workflow that doesn't run
+  # never reports the required check, and GitHub then blocks the merge. A job skipped by `if:` counts as passed.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.diff.outputs.images }}
+    steps:
+      - name: Checkout repository
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check paths
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "${{ github.event_name }}" != pull_request ]; then
+            echo "images=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE...$HEAD")
+          echo "$files"
+          if echo "$files" | grep -qE '^(images/|cmd/|internal/|api/|go\.mod$|go\.sum$|\.github/workflows/ci\.yaml$)'; then
+            echo "images=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "images=false" >> "$GITHUB_OUTPUT"
+            echo "No image inputs changed: image builds are skipped."
+          fi
+
   lint-and-test:
     name: Lint, Vet, Unit Tests & Helm Lint
     runs-on: ubuntu-latest
@@ -65,8 +97,8 @@ jobs:
   # is unchanged since the previous release: the existing image only gets the new tags.
   build-images:
     name: Build ${{ matrix.image }}
-    needs: lint-and-test
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')
+    needs: [lint-and-test, changes]
+    if: (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v')) && needs.changes.outputs.images == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
